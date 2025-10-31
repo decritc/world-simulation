@@ -2,6 +2,7 @@
 
 import pyglet
 from pyglet.gl import *
+from pyglet.gl.glu import gluPerspective
 import numpy as np
 import math
 

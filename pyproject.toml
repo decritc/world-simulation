@@ -1,0 +1,22 @@
+[project]
+name = "world-simulation"
+version = "0.1.0"
+description = "A 3D procedurally generated world simulation with AI NPCs evolved using genetic algorithms"
+readme = "README.md"
+authors = [
+    { name = "decritc", email = "decritc@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pyglet>=2.0.0",
+    "numpy>=1.24.0",
+    "noise>=1.2.2",
+    "deap>=1.4.1",
+]
+
+[project.scripts]
+world-simulation = "world_simulation:main"
+
+[build-system]
+requires = ["uv_build>=0.9.3,<0.10.0"]
+build-backend = "uv_build"

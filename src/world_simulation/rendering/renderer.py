@@ -267,6 +267,11 @@ class Renderer:
         # Render terrain
         self._render_terrain()
         
+        # Render vegetation
+        for veg in self.world.vegetation:
+            if veg.is_alive:
+                self._render_vegetation(veg)
+        
         # Render houses
         for house in self.world.houses:
             self._render_house(house)
@@ -319,13 +324,80 @@ class Renderer:
             glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 10.0)
             glColor3f(0.2, 0.5, 0.15)
         
-        # Render ground plane with gradient colors
+        # Render terrain mesh using heightmap
+        terrain_size = 200  # Render 200x200 unit area
+        resolution = 50  # 50x50 grid for terrain mesh
+        
+        # Render visible area around camera
+        render_start_x = self.camera_x - terrain_size / 2
+        render_start_z = self.camera_z - terrain_size / 2
+        
+        step = terrain_size / resolution
+        
+        # Render terrain mesh
         glBegin(GL_QUADS)
-        glNormal3f(0.0, 1.0, 0.0)
-        glVertex3f(-100, 0, -100)
-        glVertex3f(100, 0, -100)
-        glVertex3f(100, 0, 100)
-        glVertex3f(-100, 0, 100)
+        for z in range(resolution):
+            for x in range(resolution):
+                world_x1 = render_start_x + x * step
+                world_z1 = render_start_z + z * step
+                world_x2 = render_start_x + (x + 1) * step
+                world_z2 = render_start_z + (z + 1) * step
+                
+                # Get heights at corners
+                h1 = self.world.get_height(world_x1, world_z1)
+                h2 = self.world.get_height(world_x2, world_z1)
+                h3 = self.world.get_height(world_x2, world_z2)
+                h4 = self.world.get_height(world_x1, world_z2)
+                
+                # Get terrain type for color variation
+                terrain_type = self.world.generator.get_terrain_type(
+                    self.world.get_height(world_x1, world_z1) / self.world.generator.max_height
+                )
+                
+                # Adjust color based on terrain type
+                if not is_night:
+                    if terrain_type == 'valley':
+                        glColor3f(0.15, 0.4, 0.1)  # Darker green for valleys
+                    elif terrain_type == 'lowland':
+                        glColor3f(0.2, 0.5, 0.15)  # Normal grass
+                    elif terrain_type == 'hill':
+                        glColor3f(0.25, 0.55, 0.2)  # Lighter green for hills
+                    elif terrain_type == 'mountain':
+                        glColor3f(0.3, 0.35, 0.25)  # Gray-green for mountains
+                    else:  # peak
+                        glColor3f(0.4, 0.4, 0.4)  # Gray for peaks
+                
+                # Calculate normal for lighting
+                dx = world_x2 - world_x1
+                dz = world_z2 - world_z1
+                dh_x = h2 - h1
+                dh_z = h4 - h1
+                
+                # Normal vector (cross product of two edge vectors)
+                # Edge 1: (dx, dh_x, 0)
+                # Edge 2: (0, dh_z, dz)
+                # Cross product = (dh_x * dz, -dx * dz, dx * dh_z)
+                nx = dh_x * dz
+                ny = -dx * dz
+                nz = dx * dh_z
+                
+                # Normalize
+                length = (nx**2 + ny**2 + nz**2) ** 0.5
+                if length > 0.0001:  # Avoid division by zero
+                    nx /= length
+                    ny /= length
+                    nz /= length
+                else:
+                    nx, ny, nz = 0.0, 1.0, 0.0  # Default to up
+                
+                glNormal3f(nx, ny, nz)
+                
+                # Draw quad with correct winding order
+                glVertex3f(world_x1, h1, world_z1)
+                glVertex3f(world_x2, h2, world_z1)
+                glVertex3f(world_x2, h3, world_z2)
+                glVertex3f(world_x1, h4, world_z2)
+        
         glEnd()
         
         # Re-enable COLOR_MATERIAL for other objects
@@ -850,6 +922,141 @@ class Renderer:
         glEnd()
         
         glPopMatrix()
+    
+    def _render_vegetation(self, veg):
+        """Render a vegetation instance (bush, grass, flower, rock)."""
+        hour = (self.world.day_time / self.world.day_length) * 24.0
+        is_night = hour < 6.0 or hour >= 18.0
+        
+        glPushMatrix()
+        glTranslatef(veg.x, veg.y * self.world.generator.max_height, veg.z)
+        
+        # Set material based on vegetation type
+        glEnable(GL_COLOR_MATERIAL)
+        glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE)
+        
+        if veg.vegetation_type == 'bush':
+            if is_night:
+                glColor3f(0.0, 0.08, 0.12)
+            else:
+                glColor3f(0.2, 0.4, 0.1)
+            # Render as small sphere
+            self._render_sphere(veg.size)
+        elif veg.vegetation_type == 'grass':
+            if is_night:
+                glColor3f(0.0, 0.05, 0.08)
+            else:
+                glColor3f(0.15, 0.5, 0.1)
+            # Render as small cylinder
+            self._render_grass_patch(veg.size)
+        elif veg.vegetation_type == 'flower':
+            if is_night:
+                glColor3f(0.0, 0.06, 0.1)
+            else:
+                glColor3f(0.8, 0.6, 0.2)  # Yellow flower
+            # Render as small sphere with stem
+            self._render_flower(veg.size)
+        elif veg.vegetation_type == 'rock':
+            if is_night:
+                glColor3f(0.05, 0.05, 0.08)
+            else:
+                glColor3f(0.4, 0.4, 0.35)
+            # Render as small cube
+            self._render_rock(veg.size)
+        
+        glPopMatrix()
+    
+    def _render_sphere(self, radius):
+        """Render a simple sphere."""
+        import math
+        segments = 8
+        for i in range(segments):
+            lat1 = math.pi * (-0.5 + i / segments)
+            lat2 = math.pi * (-0.5 + (i + 1) / segments)
+            
+            glBegin(GL_QUAD_STRIP)
+            for j in range(segments + 1):
+                lng = 2 * math.pi * j / segments
+                x1 = radius * math.cos(lat1) * math.cos(lng)
+                y1 = radius * math.sin(lat1)
+                z1 = radius * math.cos(lat1) * math.sin(lng)
+                x2 = radius * math.cos(lat2) * math.cos(lng)
+                y2 = radius * math.sin(lat2)
+                z2 = radius * math.cos(lat2) * math.sin(lng)
+                glVertex3f(x1, y1, z1)
+                glVertex3f(x2, y2, z2)
+            glEnd()
+    
+    def _render_grass_patch(self, size):
+        """Render a grass patch as small vertical quads."""
+        import math
+        num_blades = 3
+        for i in range(num_blades):
+            angle = (i / num_blades) * 2 * math.pi
+            glPushMatrix()
+            glRotatef(angle * 180 / math.pi, 0, 1, 0)
+            glBegin(GL_QUADS)
+            glVertex3f(-size * 0.1, 0, 0)
+            glVertex3f(size * 0.1, 0, 0)
+            glVertex3f(size * 0.1, size * 0.5, 0)
+            glVertex3f(-size * 0.1, size * 0.5, 0)
+            glEnd()
+            glPopMatrix()
+    
+    def _render_flower(self, size):
+        """Render a flower with petals."""
+        # Stem
+        glColor3f(0.0, 0.3, 0.0)
+        glBegin(GL_QUADS)
+        glVertex3f(-size * 0.05, 0, 0)
+        glVertex3f(size * 0.05, 0, 0)
+        glVertex3f(size * 0.05, size * 0.3, 0)
+        glVertex3f(-size * 0.05, size * 0.3, 0)
+        glEnd()
+        
+        # Petals (small spheres)
+        hour = (self.world.day_time / self.world.day_length) * 24.0
+        is_night = hour < 6.0 or hour >= 18.0
+        if is_night:
+            glColor3f(0.0, 0.06, 0.1)
+        else:
+            glColor3f(0.8, 0.6, 0.2)
+        glPushMatrix()
+        glTranslatef(0, size * 0.3, 0)
+        self._render_sphere(size * 0.2)
+        glPopMatrix()
+    
+    def _render_rock(self, size):
+        """Render a rock as an irregular cube."""
+        glBegin(GL_QUADS)
+        # Top
+        glVertex3f(-size, size, -size)
+        glVertex3f(size, size, -size)
+        glVertex3f(size, size, size)
+        glVertex3f(-size, size, size)
+        # Bottom
+        glVertex3f(-size, 0, size)
+        glVertex3f(size, 0, size)
+        glVertex3f(size, 0, -size)
+        glVertex3f(-size, 0, -size)
+        # Sides
+        glVertex3f(-size, 0, -size)
+        glVertex3f(-size, size, -size)
+        glVertex3f(-size, size, size)
+        glVertex3f(-size, 0, size)
+        glVertex3f(size, 0, size)
+        glVertex3f(size, size, size)
+        glVertex3f(size, size, -size)
+        glVertex3f(size, 0, -size)
+        glVertex3f(-size, 0, -size)
+        glVertex3f(size, 0, -size)
+        glVertex3f(size, size, -size)
+        glVertex3f(-size, size, -size)
+        glVertex3f(-size, 0, size)
+        glVertex3f(-size, size, size)
+        glVertex3f(size, size, size)
+        glVertex3f(size, 0, size)
+        glEnd()
     
     def _pick_npc(self, screen_x: int, screen_y: int):
         """

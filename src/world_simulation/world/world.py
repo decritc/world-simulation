@@ -2,6 +2,7 @@
 
 from typing import Dict, List, Tuple
 import numpy as np
+from world_simulation.world.vegetation import Vegetation, VegetationGenerator
 
 from .generator import WorldGenerator
 
@@ -16,6 +17,8 @@ class World:
         self.entities: List = []
         self.trees: List = []
         self.houses: List = []
+        self.vegetation: List[Vegetation] = []
+        self.vegetation_generator = VegetationGenerator(seed)
         
         # Time tracking
         self.time = 0.0  # Total simulation time
@@ -72,22 +75,30 @@ class World:
             z: Z coordinate
             
         Returns:
-            Height value at the given coordinates
+            Height value at the given coordinates (scaled to world units)
         """
         chunk_x = int(x // 64)
         chunk_z = int(z // 64)
         
         chunk = self.get_chunk(chunk_x, chunk_z)
         
+        # Handle negative coordinates properly
         local_x = int(x % 64)
         local_z = int(z % 64)
+        
+        if local_x < 0:
+            local_x += 64
+        if local_z < 0:
+            local_z += 64
         
         if local_x >= 64:
             local_x = 63
         if local_z >= 64:
             local_z = 63
         
-        return chunk[local_z][local_x]
+        # Scale normalized height (0-1) to world height (0 to max_height)
+        normalized_height = chunk[local_z][local_x]
+        return normalized_height * self.generator.max_height
     
     def update(self, delta_time: float):
         """Update the world simulation."""

@@ -282,6 +282,13 @@ class NPC:
             distance = np.random.uniform(5.0, 15.0)
             self.target_x = self.x + np.cos(angle) * distance
             self.target_z = self.z + np.sin(angle) * distance
+            # Ensure target is at valid terrain height
+            target_y = world.get_height(self.target_x, self.target_z)
+            # Check if terrain is too steep (prevent NPCs from getting stuck)
+            if abs(target_y - self.y) > 10.0:  # Too steep, pick new target
+                self.target_x = None
+                self.target_z = None
+                return
         
         # Move towards target
         dx = self.target_x - self.x
@@ -296,6 +303,7 @@ class NPC:
             move_speed = self.speed * delta_time
             self.x += (dx / distance) * move_speed
             self.z += (dz / distance) * move_speed
+            # Update Y position to match terrain height
             self.y = world.get_height(self.x, self.z)
         
         # Check for food (less aggressive threshold - let neural network decide)

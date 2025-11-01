@@ -2,19 +2,30 @@
 
 import numpy as np
 from noise import pnoise2
+from typing import List, Dict, Any
 
 
 class WorldGenerator:
-    """Generates 3D terrain using Perlin noise."""
+    """Generates 3D terrain using Perlin noise with hills and mountains."""
     
     def __init__(self, seed: int = 42):
         """Initialize the world generator with a seed."""
         self.seed = seed
         np.random.seed(seed)
-    
+        
+        # Terrain generation parameters
+        self.max_height = 25.0  # Maximum height for mountains
+        self.hill_height = 8.0  # Maximum height for hills
+        self.terrain_scale = 80.0  # Large-scale terrain features
+        
     def generate_heightmap(self, width: int, height: int, scale: float = 100.0) -> np.ndarray:
         """
-        Generate a heightmap for the terrain.
+        Generate a heightmap for the terrain with hills and mountains.
+        
+        Uses multiple octaves of Perlin noise to create:
+        - Large-scale mountain ranges (low frequency)
+        - Medium-scale hills (medium frequency)
+        - Small-scale details (high frequency)
         
         Args:
             width: Width of the terrain
@@ -22,14 +33,26 @@ class WorldGenerator:
             scale: Scale factor for noise (higher = smoother terrain)
             
         Returns:
-            2D numpy array of height values
+            2D numpy array of height values (0.0 = sea level, 1.0 = mountain peak)
         """
         heightmap = np.zeros((height, width))
         
         for y in range(height):
             for x in range(width):
-                # Use Perlin noise for natural-looking terrain
-                heightmap[y][x] = pnoise2(
+                # Large-scale mountain ranges (low frequency, high amplitude)
+                mountains = pnoise2(
+                    x / (scale * 4.0),
+                    y / (scale * 4.0),
+                    octaves=4,
+                    persistence=0.6,
+                    lacunarity=2.0,
+                    repeatx=1024,
+                    repeaty=1024,
+                    base=self.seed
+                )
+                
+                # Medium-scale hills (medium frequency, medium amplitude)
+                hills = pnoise2(
                     x / scale,
                     y / scale,
                     octaves=6,
@@ -37,11 +60,45 @@ class WorldGenerator:
                     lacunarity=2.0,
                     repeatx=1024,
                     repeaty=1024,
-                    base=self.seed
+                    base=self.seed + 1000
                 )
+                
+                # Small-scale details (high frequency, low amplitude)
+                details = pnoise2(
+                    x / (scale * 0.5),
+                    y / (scale * 0.5),
+                    octaves=8,
+                    persistence=0.4,
+                    lacunarity=2.0,
+                    repeatx=1024,
+                    repeaty=1024,
+                    base=self.seed + 2000
+                )
+                
+                # Combine noise layers with different weights
+                # Mountains contribute most to height, hills add variation, details add texture
+                combined = (
+                    mountains * 0.6 +  # Mountains dominate
+                    hills * 0.3 +      # Hills add variation
+                    details * 0.1      # Details add fine texture
+                )
+                
+                heightmap[y][x] = combined
         
         # Normalize to 0-1 range
-        heightmap = (heightmap - heightmap.min()) / (heightmap.max() - heightmap.min())
+        min_val = heightmap.min()
+        max_val = heightmap.max()
+        if max_val > min_val:
+            heightmap = (heightmap - min_val) / (max_val - min_val)
+        else:
+            heightmap = np.zeros_like(heightmap)
+        
+        # Apply elevation curve to create distinct zones:
+        # 0.0-0.3: Lowlands/valleys
+        # 0.3-0.6: Hills
+        # 0.6-0.8: Mountains
+        # 0.8-1.0: Mountain peaks
+        heightmap = np.power(heightmap, 1.5)  # Steeper slopes for mountains
         
         return heightmap
     
@@ -60,5 +117,107 @@ class WorldGenerator:
         offset_x = chunk_x * chunk_size
         offset_y = chunk_y * chunk_size
         
-        return self.generate_heightmap(chunk_size, chunk_size, scale=50.0)
+        heightmap = np.zeros((chunk_size, chunk_size))
+        
+        for y in range(chunk_size):
+            for x in range(chunk_size):
+                world_x = offset_x + x
+                world_z = offset_y + y
+                
+                # Large-scale mountain ranges
+                mountains = pnoise2(
+                    world_x / (self.terrain_scale * 4.0),
+                    world_z / (self.terrain_scale * 4.0),
+                    octaves=4,
+                    persistence=0.6,
+                    lacunarity=2.0,
+                    repeatx=1024,
+                    repeaty=1024,
+                    base=self.seed
+                )
+                
+                # Medium-scale hills
+                hills = pnoise2(
+                    world_x / self.terrain_scale,
+                    world_z / self.terrain_scale,
+                    octaves=6,
+                    persistence=0.5,
+                    lacunarity=2.0,
+                    repeatx=1024,
+                    repeaty=1024,
+                    base=self.seed + 1000
+                )
+                
+                # Small-scale details
+                details = pnoise2(
+                    world_x / (self.terrain_scale * 0.5),
+                    world_z / (self.terrain_scale * 0.5),
+                    octaves=8,
+                    persistence=0.4,
+                    lacunarity=2.0,
+                    repeatx=1024,
+                    repeaty=1024,
+                    base=self.seed + 2000
+                )
+                
+                combined = mountains * 0.6 + hills * 0.3 + details * 0.1
+                heightmap[y][x] = combined
+        
+        # Normalize
+        min_val = heightmap.min()
+        max_val = heightmap.max()
+        if max_val > min_val:
+            heightmap = (heightmap - min_val) / (max_val - min_val)
+        
+        # Apply elevation curve
+        heightmap = np.power(heightmap, 1.5)
+        
+        return heightmap
+    
+    def get_terrain_type(self, height: float) -> str:
+        """
+        Determine terrain type based on height.
+        
+        Args:
+            height: Normalized height value (0.0 to 1.0)
+            
+        Returns:
+            Terrain type: 'valley', 'lowland', 'hill', 'mountain', 'peak'
+        """
+        if height < 0.2:
+            return 'valley'
+        elif height < 0.4:
+            return 'lowland'
+        elif height < 0.6:
+            return 'hill'
+        elif height < 0.8:
+            return 'mountain'
+        else:
+            return 'peak'
+    
+    def generate_vegetation_noise(self, x: float, z: float) -> float:
+        """
+        Generate noise value for vegetation density.
+        Higher values indicate more vegetation.
+        
+        Args:
+            x: World X coordinate
+            z: World Z coordinate
+            
+        Returns:
+            Noise value between 0.0 and 1.0
+        """
+        vegetation_noise = pnoise2(
+            x / 20.0,
+            z / 20.0,
+            octaves=4,
+            persistence=0.5,
+            lacunarity=2.0,
+            repeatx=1024,
+            repeaty=1024,
+            base=self.seed + 5000
+        )
+        
+        # Normalize to 0-1
+        return (vegetation_noise + 1.0) / 2.0
 

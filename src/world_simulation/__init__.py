@@ -64,6 +64,19 @@ def main() -> None:
     
     renderer.log("World initialized with houses and trees")
     
+    # Generate vegetation procedurally
+    print("Generating vegetation...")
+    vegetation = world.vegetation_generator.generate_vegetation_for_area(
+        x_min=-50, x_max=50,
+        z_min=-50, z_max=50,
+        height_func=lambda x, z: world.get_height(x, z) / world.generator.max_height,
+        vegetation_noise_func=lambda x, z: world.generator.generate_vegetation_noise(x, z),
+        density=0.15  # 15% density
+    )
+    world.vegetation.extend(vegetation)
+    print(f"Generated {len(vegetation)} vegetation instances")
+    renderer.log(f"Generated {len(vegetation)} vegetation instances")
+    
     # Simulation variables
     generation_time = 0.0
     generation_length = 300.0  # seconds per generation

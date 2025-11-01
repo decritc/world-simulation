@@ -2,7 +2,10 @@
 
 from typing import List, Dict, Any
 import numpy as np
+import torch.nn as nn
 from world_simulation.entities.name_generator import NameGenerator
+from world_simulation.entities.neural_network import NPCDecisionNetwork, FeatureExtractor
+from world_simulation.entities.generative_ai import GenerativeAIReasoner
 
 
 class NPC:
@@ -43,8 +46,29 @@ class NPC:
         # State
         self.target_x = None
         self.target_z = None
-        self.state = "wandering"  # wandering, seeking_food, eating, resting, seeking_shelter, in_shelter
+        self.target_tree = None  # Target tree for eating
+        self.state = "wandering"  # Current state (for compatibility/rendering)
         self.current_house = None  # House NPC is currently in
+        
+        # Neural network for decision making
+        self.brain = NPCDecisionNetwork()
+        if genome is not None and 'neural_weights' in genome:
+            # Load neural network weights from genome
+            self.brain.set_weights(np.array(genome['neural_weights']))
+        else:
+            # Initialize with random weights
+            # Apply small random initialization
+            for param in self.brain.parameters():
+                nn.init.normal_(param, mean=0.0, std=0.1)
+        
+        # Generative AI reasoner (optional, for complex decisions)
+        self.use_generative_ai = genome.get('use_generative_ai', False) if genome else False
+        self.generative_ai = GenerativeAIReasoner(use_openai=self.use_generative_ai) if self.use_generative_ai else None
+        
+        # Decision making frequency (make decisions every N seconds)
+        self.decision_timer = 0.0
+        self.decision_interval = 0.5  # Make decisions every 0.5 seconds
+        self.last_action = "wandering"
         
         # Age and lifecycle
         self.age = 0.0  # Age in seconds
@@ -147,7 +171,7 @@ class NPC:
             self.is_alive = False
             return
         
-        # Check if night and need shelter
+        # Check if night and need shelter (override neural network for critical safety)
         if world.is_night() and self.state not in ["in_shelter", "seeking_shelter"]:
             self.state = "seeking_shelter"
         elif not world.is_night() and self.state == "in_shelter":
@@ -157,7 +181,13 @@ class NPC:
                 self.current_house = None
             self.state = "wandering"
         
-        # State machine
+        # Neural network decision making (replaces old state machine)
+        self.decision_timer += delta_time
+        if self.decision_timer >= self.decision_interval:
+            self.decision_timer = 0.0
+            self._make_neural_decision(world)
+        
+        # Execute current action based on state
         if self.state == "wandering":
             self._wander(delta_time, world)
         elif self.state == "seeking_food":
@@ -174,6 +204,75 @@ class NPC:
             self.stamina = min(self.max_stamina, self.stamina + delta_time * 5.0)
             self.hunger -= delta_time * 0.2  # Less hunger loss in shelter
             # Reproduction can happen in shelter (handled by world.update)
+    
+    def _make_neural_decision(self, world):
+        """
+        Use neural network to make a decision about next action.
+        
+        This replaces the old state machine logic with neural network-based decision making.
+        """
+        # Extract features from current state
+        features = FeatureExtractor.extract_features(self, world)
+        
+        # Convert to tensor
+        import torch
+        feature_tensor = torch.FloatTensor(features).unsqueeze(0)
+        
+        # Get neural network prediction
+        self.brain.eval()
+        with torch.no_grad():
+            action_probs, movement_vec = self.brain(feature_tensor)
+        
+        action_probs_np = action_probs.squeeze().numpy()
+        movement_vec_np = movement_vec.squeeze().numpy()
+        
+        # Decode action
+        predicted_action = FeatureExtractor.decode_action(action_probs_np)
+        
+        # Optional: Use generative AI for complex reasoning
+        if self.generative_ai and np.random.random() < 0.1:  # 10% chance to use generative AI
+            npc_state = {
+                'health': self.health,
+                'max_health': self.max_health,
+                'hunger': self.hunger,
+                'max_hunger': self.max_hunger,
+                'stamina': self.stamina,
+                'max_stamina': self.max_stamina,
+                'age_stage': self.age_stage,
+                'in_shelter': self.state == "in_shelter",
+            }
+            
+            world_context = {
+                'is_night': world.is_night(),
+                'nearest_food_dist': 'near' if action_probs_np[1] > 0.5 else 'far',
+                'nearest_shelter_dist': 'near' if action_probs_np[4] > 0.5 else 'far',
+            }
+            
+            ai_reasoning = self.generative_ai.reason_about_action(npc_state, world_context)
+            
+            # Blend neural network decision with generative AI reasoning
+            if ai_reasoning['confidence'] > 0.7:
+                predicted_action = ai_reasoning['action']
+        
+        # Update state based on neural network decision
+        # But respect constraints (e.g., can't eat if no food nearby, can't seek shelter if child)
+        if predicted_action == "eating" and (self.target_tree is None or self.target_tree.get_ripe_fruit_count() == 0):
+            predicted_action = "seeking_food"
+        
+        if predicted_action == "seeking_shelter" and self.age_stage != "adult":
+            predicted_action = "wandering"  # Children can't enter houses
+        
+        if predicted_action == "stay_in_shelter" and self.state != "in_shelter":
+            predicted_action = "seeking_shelter"
+        
+        self.state = predicted_action
+        self.last_action = predicted_action
+        
+        # Update movement target based on neural network output
+        if predicted_action in ["wandering", "seeking_food", "seeking_shelter"]:
+            target_x, target_z = FeatureExtractor.decode_movement(movement_vec_np, self)
+            self.target_x = target_x
+            self.target_z = target_z
     
     def _wander(self, delta_time: float, world):
         """Wander randomly around the world."""
@@ -199,12 +298,12 @@ class NPC:
             self.z += (dz / distance) * move_speed
             self.y = world.get_height(self.x, self.z)
         
-        # Check for food
-        if self.hunger < 50.0:
+        # Check for food (less aggressive threshold - let neural network decide)
+        if self.hunger < 30.0:  # Lower threshold for emergency
             self.state = "seeking_food"
         
-        # Check for rest
-        if self.stamina < 20.0:
+        # Check for rest (less aggressive threshold)
+        if self.stamina < 15.0:  # Lower threshold for emergency
             self.state = "resting"
     
     def _seek_shelter(self, delta_time: float, world):
@@ -284,7 +383,7 @@ class NPC:
     
     def _eat(self, delta_time: float, world):
         """Eat fruit from a tree."""
-        if hasattr(self, 'target_tree') and self.target_tree:
+        if self.target_tree:
             tree = self.target_tree
             
             # Check if still near tree
@@ -348,6 +447,9 @@ class NPC:
             if key == 'name':
                 # Skip name - will be generated separately
                 continue
+            if key == 'neural_weights':
+                # Handle neural network weights separately
+                continue
             if key in partner.genome:
                 # Average of parents with some mutation
                 parent_avg = (self.genome[key] + partner.genome[key]) / 2.0
@@ -355,6 +457,11 @@ class NPC:
                 offspring_genome[key] = max(0.1, parent_avg + mutation)
             else:
                 offspring_genome[key] = self.genome[key]
+        
+        # Create offspring neural network by crossing over parents' networks
+        offspring_brain = NPCDecisionNetwork.crossover(self.brain, partner.brain)
+        offspring_brain.mutate(mutation_rate=0.1, mutation_strength=0.05)
+        offspring_genome['neural_weights'] = offspring_brain.get_weights().tolist()
         
         # Generate offspring name (mix of parents' last names or generate new)
         # 50% chance to inherit last name from one parent, 50% chance for new name
@@ -381,6 +488,10 @@ class NPC:
         
         # Create offspring
         offspring = NPC(spawn_x, spawn_y, spawn_z, genome=offspring_genome)
+        
+        # Set the offspring's neural network (already loaded from genome, but ensure it's set)
+        if 'neural_weights' in offspring_genome:
+            offspring.brain.set_weights(np.array(offspring_genome['neural_weights']))
         
         # Offspring starts as child
         offspring.age = 0.0

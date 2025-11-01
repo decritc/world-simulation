@@ -152,6 +152,16 @@ class World:
                             self.renderer.log(f"New offspring born! Age stage: {offspring.age_stage}")
         
         # Update trees
+        trees_to_remove = []
         for tree in self.trees:
+            was_alive = tree.is_alive
             tree.update(delta_time, self)
+            # Track trees that died (but don't remove yet - they might spawn new trees)
+            if not tree.is_alive and was_alive:
+                trees_to_remove.append(tree)
+        
+        # Remove dead trees after they've had a chance to spawn new ones
+        for tree in trees_to_remove:
+            if tree in self.trees:
+                self.trees.remove(tree)
 

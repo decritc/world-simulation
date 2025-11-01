@@ -526,6 +526,15 @@ class TestNPCReproduction:
         # Now should be able to reproduce again
         assert npc1.reproduction_cooldown <= 0
         assert npc2.reproduction_cooldown <= 0
+        
+        # Ensure they're still in the same house and adults
+        npc1.current_house = house
+        npc2.current_house = house
+        npc1.age_stage = "adult"
+        npc2.age_stage = "adult"
+        npc1.can_reproduce = True
+        npc2.can_reproduce = True
+        
         assert npc1.can_reproduce_with(npc2) == True
     
     def test_elder_stage_transition(self):

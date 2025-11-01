@@ -35,8 +35,8 @@ class Renderer:
         self.camera_yaw = 0.0
         self.camera_pitch = -45.0
         
-        # Controls - use dictionary to track keys manually for better reliability
-        self.keys = {}
+        # Controls - track keys manually for better reliability
+        self.keys = {}  # Dictionary to track pressed keys
         self.keys_handler = pyglet.window.key.KeyStateHandler()
         self.window.push_handlers(self.keys_handler)
         
@@ -85,8 +85,11 @@ class Renderer:
         def on_draw():
             self.render()
         
+        # Add explicit key handlers to ensure keys are tracked
         @self.window.event
         def on_key_press(symbol, modifiers):
+            # Track key press
+            self.keys[symbol] = True
             # Press 'T' to toggle color debug mode
             if symbol == pyglet.window.key.T:
                 self.debug_colors = not self.debug_colors
@@ -94,6 +97,11 @@ class Renderer:
                     self.log("Color debug mode ON - checking nighttime colors")
                 else:
                     self.log("Color debug mode OFF")
+        
+        @self.window.event
+        def on_key_release(symbol, modifiers):
+            # Track key release
+            self.keys[symbol] = False
         
         @self.window.event
         def on_mouse_press(x, y, button, modifiers):
@@ -150,26 +158,34 @@ class Renderer:
         right_z = np.sin(yaw_rad)
         
         # Keyboard movement (WASD) - relative to camera direction
-        # Use KeyStateHandler for reliable key detection
-        if self.keys_handler[pyglet.window.key.W]:
+        # Use manual keys dict (updated by on_key_press/on_key_release) as primary
+        # Fallback to KeyStateHandler if key not in dict
+        w_pressed = self.keys.get(pyglet.window.key.W, False) or self.keys_handler[pyglet.window.key.W]
+        s_pressed = self.keys.get(pyglet.window.key.S, False) or self.keys_handler[pyglet.window.key.S]
+        a_pressed = self.keys.get(pyglet.window.key.A, False) or self.keys_handler[pyglet.window.key.A]
+        d_pressed = self.keys.get(pyglet.window.key.D, False) or self.keys_handler[pyglet.window.key.D]
+        space_pressed = self.keys.get(pyglet.window.key.SPACE, False) or self.keys_handler[pyglet.window.key.SPACE]
+        shift_pressed = self.keys.get(pyglet.window.key.LSHIFT, False) or self.keys_handler[pyglet.window.key.LSHIFT]
+        
+        if w_pressed:
             # Forward (along camera's facing direction)
             self.camera_x += forward_x * move_speed
             self.camera_z += forward_z * move_speed
-        if self.keys_handler[pyglet.window.key.S]:
+        if s_pressed:
             # Backward (opposite of camera's facing direction)
             self.camera_x -= forward_x * move_speed
             self.camera_z -= forward_z * move_speed
-        if self.keys_handler[pyglet.window.key.A]:
+        if a_pressed:
             # Left (strafe left relative to camera)
             self.camera_x -= right_x * move_speed
             self.camera_z -= right_z * move_speed
-        if self.keys_handler[pyglet.window.key.D]:
+        if d_pressed:
             # Right (strafe right relative to camera)
             self.camera_x += right_x * move_speed
             self.camera_z += right_z * move_speed
-        if self.keys_handler[pyglet.window.key.SPACE]:
+        if space_pressed:
             self.camera_y += move_speed
-        if self.keys_handler[pyglet.window.key.LSHIFT]:
+        if shift_pressed:
             self.camera_y -= move_speed
         
         self.camera_y = max(5.0, self.camera_y)
@@ -988,9 +1004,9 @@ class Renderer:
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
         
-        # Panel dimensions (increased height to prevent overlap)
+        # Panel dimensions (increased height to accommodate NN visualization)
         panel_width = 400
-        panel_height = 600
+        panel_height = 750  # Increased from 600
         panel_x = self.window.width - panel_width - 20
         panel_y = self.window.height - panel_height - 20
         
@@ -1215,14 +1231,16 @@ class Renderer:
         glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
         
-        # Calculate text area (leave bottom 200 pixels for bars)
+        # Calculate text area (leave bottom 350 pixels for bars and NN visualization)
         bar_area_height = 200  # Space reserved for bars at bottom
+        nn_area_height = 150  # Space for neural network visualization
+        total_bottom_area = bar_area_height + nn_area_height
         text_start_y = panel_y + panel_height - 20
-        text_end_y = panel_y + bar_area_height  # Stop text before bar area
+        text_end_y = panel_y + total_bottom_area  # Stop text before bar/NN area
         
         text_y = text_start_y
         for i, line in enumerate(lines):
-            # Stop rendering text if we've reached the bar area
+            # Stop rendering text if we've reached the reserved area
             if text_y < text_end_y:
                 break
                 
@@ -1260,6 +1278,9 @@ class Renderer:
             else:
                 text_y -= 6  # Slightly increased spacing for blank lines
         
+        # Render neural network visualization above bars
+        self._render_neural_network_visualization(npc, panel_x, panel_y + bar_area_height, panel_width, nn_area_height)
+        
         # Restore OpenGL state
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
@@ -1268,6 +1289,191 @@ class Renderer:
         glMatrixMode(GL_PROJECTION)
         glPopMatrix()
         glMatrixMode(GL_MODELVIEW)
+    
+    def _render_neural_network_visualization(self, npc, x, y, width, height):
+        """
+        Render a graphical representation of the NPC's neural network.
+        
+        Args:
+            npc: NPC instance
+            x: Left position of visualization area
+            y: Bottom position of visualization area
+            width: Width of visualization area
+            height: Height of visualization area
+        """
+        if not hasattr(npc, 'brain'):
+            return
+        
+        # Setup 2D rendering (already in 2D mode, but ensure lighting is off)
+        glDisable(GL_LIGHTING)
+        glDisable(GL_DEPTH_TEST)
+        
+        # Title
+        try:
+            title_label = pyglet.text.Label(
+                "Neural Network Architecture:",
+                font_name='Courier New',
+                font_size=11,
+                x=int(x + 10),
+                y=int(y + height - 15),
+                anchor_x='left',
+                anchor_y='top',
+                color=(200, 200, 255, 255)
+            )
+            title_label.draw()
+        except:
+            pass
+        
+        # Get network structure
+        brain = npc.brain
+        
+        # Layer sizes (simplified visualization - show subset of neurons)
+        layer_sizes = [min(12, brain.input_size), 8, 8, 6, 6]  # Reduced for visibility
+        
+        # Calculate positions
+        num_layers = len(layer_sizes)
+        layer_spacing = (width - 40) / max(1, num_layers - 1)
+        neuron_radius = 3.0
+        vis_height = height - 50  # Leave space for title and info
+        
+        # Draw connections first (so neurons appear on top)
+        glLineWidth(0.5)
+        for layer_idx in range(num_layers - 1):
+            num_neurons_current = layer_sizes[layer_idx]
+            num_neurons_next = layer_sizes[layer_idx + 1]
+            
+            layer_x = x + 20 + layer_idx * layer_spacing
+            next_layer_x = x + 20 + (layer_idx + 1) * layer_spacing
+            
+            # Get weights for this layer connection
+            layer_weights = None
+            try:
+                if layer_idx == 0:
+                    layer_weights = brain.fc1.weight.data.cpu().numpy()
+                elif layer_idx == 1:
+                    layer_weights = brain.fc2.weight.data.cpu().numpy()
+                elif layer_idx == 2:
+                    layer_weights = brain.fc3.weight.data.cpu().numpy()
+                elif layer_idx == 3:
+                    layer_weights = brain.fc_action.weight.data.cpu().numpy()
+                
+                if layer_weights is not None:
+                    # Normalize weights for visualization
+                    weight_max = max(abs(layer_weights.max()), abs(layer_weights.min()))
+                    if weight_max > 0:
+                        layer_weights = layer_weights / weight_max
+            except:
+                layer_weights = None
+            
+            for neuron_idx_current in range(num_neurons_current):
+                neuron_y_current = y + 20 + (neuron_idx_current + 1) * vis_height / (num_neurons_current + 1)
+                
+                for neuron_idx_next in range(num_neurons_next):
+                    neuron_y_next = y + 20 + (neuron_idx_next + 1) * vis_height / (num_neurons_next + 1)
+                    
+                    # Get weight strength
+                    if layer_weights is not None and neuron_idx_current < layer_weights.shape[1] and neuron_idx_next < layer_weights.shape[0]:
+                        weight = layer_weights[neuron_idx_next, neuron_idx_current]
+                    else:
+                        weight = 0.0
+                    
+                    # Color based on weight (green = positive, red = negative, gray = near zero)
+                    weight_abs = abs(weight)
+                    if weight_abs < 0.1:
+                        glColor4f(0.2, 0.2, 0.2, 0.1)  # Very faint gray
+                    elif weight > 0:
+                        glColor4f(0.0, 0.6, 0.0, min(0.6, weight_abs * 0.8))  # Green for positive
+                    else:
+                        glColor4f(0.6, 0.0, 0.0, min(0.6, weight_abs * 0.8))  # Red for negative
+                    
+                    glBegin(GL_LINES)
+                    glVertex2f(layer_x, neuron_y_current)
+                    glVertex2f(next_layer_x, neuron_y_next)
+                    glEnd()
+        
+        # Draw neurons (circles)
+        for layer_idx in range(num_layers):
+            num_neurons = layer_sizes[layer_idx]
+            layer_x = x + 20 + layer_idx * layer_spacing
+            
+            # Layer label
+            layer_names = ["Input", "Hidden1", "Hidden2", "Hidden3", "Output"]
+            layer_name = layer_names[layer_idx] if layer_idx < len(layer_names) else f"Layer{layer_idx}"
+            try:
+                label = pyglet.text.Label(
+                    layer_name,
+                    font_name='Courier New',
+                    font_size=8,
+                    x=int(layer_x),
+                    y=int(y + height - 25),
+                    anchor_x='center',
+                    anchor_y='top',
+                    color=(255, 255, 255, 255)
+                )
+                label.draw()
+            except:
+                pass
+            
+            # Draw neurons in this layer
+            for neuron_idx in range(num_neurons):
+                neuron_y = y + 20 + (neuron_idx + 1) * vis_height / (num_neurons + 1)
+                
+                # Neuron color based on layer
+                if layer_idx == 0:
+                    glColor3f(0.3, 0.7, 1.0)  # Blue for input
+                elif layer_idx == num_layers - 1:
+                    glColor3f(1.0, 0.8, 0.3)  # Yellow for output
+                else:
+                    glColor3f(0.5, 0.9, 0.5)  # Green for hidden
+                
+                # Draw neuron circle
+                import math
+                num_segments = 12
+                glBegin(GL_TRIANGLE_FAN)
+                glVertex2f(layer_x, neuron_y)
+                for i in range(num_segments + 1):
+                    angle = (i / num_segments) * 2 * math.pi
+                    glVertex2f(
+                        layer_x + neuron_radius * math.cos(angle),
+                        neuron_y + neuron_radius * math.sin(angle)
+                    )
+                glEnd()
+                
+                # Neuron border
+                glColor3f(1.0, 1.0, 1.0)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                for i in range(num_segments):
+                    angle = (i / num_segments) * 2 * math.pi
+                    glVertex2f(
+                        layer_x + neuron_radius * math.cos(angle),
+                        neuron_y + neuron_radius * math.sin(angle)
+                    )
+                glEnd()
+        
+        # Add legend/info
+        try:
+            info_lines = [
+                f"Input: {brain.input_size} features",
+                f"Hidden: 64→64→32",
+                f"Output: 6 actions",
+                f"Lines: Green=positive, Red=negative"
+            ]
+            info_y = y + 5
+            for i, info_line in enumerate(info_lines):
+                info_label = pyglet.text.Label(
+                    info_line,
+                    font_name='Courier New',
+                    font_size=8,
+                    x=int(x + 10),
+                    y=int(info_y - i * 12),
+                    anchor_x='left',
+                    anchor_y='top',
+                    color=(180, 180, 180, 255)
+                )
+                info_label.draw()
+        except:
+            pass
     
     def _render_debug_overlay(self):
         """Render debug information overlay."""

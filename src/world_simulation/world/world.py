@@ -15,7 +15,35 @@ class World:
         self.chunks: Dict[Tuple[int, int], np.ndarray] = {}
         self.entities: List = []
         self.trees: List = []
-        self.time = 0.0
+        self.houses: List = []
+        
+        # Time tracking
+        self.time = 0.0  # Total simulation time
+        self.day_time = 0.0  # Time within current day (0-24 hours)
+        self.day_length = 120.0  # Seconds per day
+        self.day_number = 0
+        
+    def is_night(self) -> bool:
+        """Check if it's currently night time."""
+        hour = (self.day_time / self.day_length) * 24.0
+        return hour < 6.0 or hour >= 18.0  # Night from 6pm to 6am
+    
+    def get_time_of_day(self) -> float:
+        """Get current time of day (0.0 to 1.0, where 0.5 is noon)."""
+        return (self.day_time / self.day_length) % 1.0
+    
+    def get_light_intensity(self) -> float:
+        """Get light intensity based on time of day (0.0 to 1.0)."""
+        hour = (self.day_time / self.day_length) * 24.0
+        
+        if 6.0 <= hour < 8.0:  # Dawn
+            return 0.3 + 0.4 * ((hour - 6.0) / 2.0)
+        elif 8.0 <= hour < 18.0:  # Day
+            return 1.0
+        elif 18.0 <= hour < 20.0:  # Dusk
+            return 1.0 - 0.4 * ((hour - 18.0) / 2.0)
+        else:  # Night
+            return 0.3
         
     def get_chunk(self, chunk_x: int, chunk_y: int) -> np.ndarray:
         """
@@ -65,9 +93,63 @@ class World:
         """Update the world simulation."""
         self.time += delta_time
         
+        # Update day/night cycle
+        old_day = self.day_number
+        self.day_time += delta_time
+        if self.day_time >= self.day_length:
+            self.day_time = 0.0
+            self.day_number += 1
+        
         # Update entities
         for entity in self.entities:
             entity.update(delta_time, self)
+        
+        # Remove dead NPCs
+        self.entities = [entity for entity in self.entities if entity.is_alive]
+        
+        # Clean up houses - remove dead NPCs from occupancy
+        for house in self.houses:
+            # Remove dead NPC IDs from house occupants
+            dead_ids = set()
+            for npc_id in house.current_occupants:
+                # Check if any NPC still has this ID (simple check)
+                found = False
+                for entity in self.entities:
+                    if id(entity) == npc_id:
+                        found = True
+                        break
+                if not found:
+                    dead_ids.add(npc_id)
+            for npc_id in dead_ids:
+                house.remove_occupant(npc_id)
+        
+        # Handle reproduction for adults in houses
+        # Only allow reproduction if exactly 2 adults in a house
+        reproduction_chance = 0.01 * delta_time  # 1% chance per second
+        
+        for house in self.houses:
+            # Find all adult NPCs in this house
+            adult_npcs = []
+            for npc in self.entities:
+                if (npc.is_alive and npc.current_house == house and 
+                    npc.age_stage == "adult"):
+                    adult_npcs.append(npc)
+            
+            # Only reproduce if exactly 2 adults in house
+            if len(adult_npcs) == 2:
+                npc1, npc2 = adult_npcs[0], adult_npcs[1]
+                
+                # Check if they can reproduce
+                if npc1.can_reproduce_with(npc2):
+                    # Random chance to reproduce
+                    if np.random.random() < reproduction_chance:
+                        # Create offspring
+                        offspring = npc1.reproduce(npc2)
+                        offspring.y = self.get_height(offspring.x, offspring.z)
+                        self.entities.append(offspring)
+                        # Log reproduction (will be displayed in renderer if available)
+                        if hasattr(self, 'renderer') and self.renderer:
+                            self.renderer.log(f"New offspring born! Age stage: {offspring.age_stage}")
         
         # Update trees
         for tree in self.trees:

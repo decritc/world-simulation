@@ -27,7 +27,7 @@ class FruitTree:
         self.growth_stage = 0.0  # 0.0 to 1.0
         
         self.fruit_count = 0
-        self.max_fruit = 10
+        self.max_fruit = 30  # Increased from 10
         self.fruit_maturity = {}  # fruit_id -> maturity (0.0 to 1.0)
         
         self.is_alive = True
@@ -44,19 +44,19 @@ class FruitTree:
         if self.growth_stage < 1.0:
             self.growth_stage = min(1.0, self.age / 30.0)  # Full growth in 30 days
         
-        # Produce fruit if mature
+        # Produce fruit if mature - increase production rate significantly
         if self.growth_stage >= 0.5 and self.fruit_count < self.max_fruit:
-            # Chance to produce new fruit
-            if np.random.random() < 0.01 * delta_time:
+            # Chance to produce new fruit (much higher rate)
+            if np.random.random() < 0.1 * delta_time:  # Increased from 0.02
                 fruit_id = len(self.fruit_maturity)
                 self.fruit_maturity[fruit_id] = 0.0
                 self.fruit_count += 1
         
-        # Mature existing fruit
+        # Mature existing fruit - faster maturation
         for fruit_id in list(self.fruit_maturity.keys()):
-            self.fruit_maturity[fruit_id] += delta_time * 0.1
+            self.fruit_maturity[fruit_id] += delta_time * 0.2  # Faster maturation
             if self.fruit_maturity[fruit_id] >= 1.0:
-                # Fruit is fully mature
+                # Fruit is fully mature and ready to eat
                 pass
         
         # Check if tree dies

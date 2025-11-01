@@ -42,7 +42,7 @@ def main() -> None:
         y = world.get_height(x, z)
         spawn_points.append((x, y, z))
     
-    world.entities = evolution_engine.create_initial_population(spawn_points)
+    world.entities = evolution_engine.create_initial_population(spawn_points, world=world)
     
     # Make initial population adults for faster start
     for npc in world.entities:
@@ -126,7 +126,7 @@ def main() -> None:
             renderer.log(f"Best fitness: {best_fitness:.2f}, Avg: {avg_fitness:.2f}")
             
             # Evolve
-            world.entities = evolution_engine.evolve(world.entities, spawn_points)
+            world.entities = evolution_engine.evolve(world.entities, spawn_points, world=world)
             generation_time = 0.0
             
             renderer.log("New generation spawned!")

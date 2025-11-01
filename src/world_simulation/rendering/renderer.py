@@ -9,6 +9,7 @@ from ..world.world import World
 from ..entities.npc import NPC
 from ..trees.tree import FruitTree
 from ..houses.house import House
+from .detail_panel import DetailPanel
 
 
 class Renderer:
@@ -50,6 +51,46 @@ class Renderer:
         # NPC selection
         self.selected_npc = None  # Currently selected NPC
         
+        # Detail panel
+        self.detail_panel = DetailPanel(self.window)
+        
+        # FPS tracking
+        self.fps_display = pyglet.window.FPSDisplay(window=self.window)
+        self.frame_count = 0
+        self.fps_update_time = 0.0
+        self.current_fps = 0.0
+        
+        # Camera frustum for culling
+        self.fov = 70.0
+        self.near_plane = 0.1
+        self.far_plane = 500.0
+        
+        # Terrain caching and batching
+        self.terrain_display_list = None
+        self.last_terrain_x = None
+        self.last_terrain_z = None
+        self.terrain_cache_radius = 40  # Cache terrain within 40 units
+        
+        # Spatial partitioning for entities
+        self.entity_grid = {}  # Grid-based spatial partitioning
+        self.grid_size = 20.0  # 20 unit grid cells
+        
+        # Performance profiling
+        self.profiling = True  # Enable by default for testing
+        self.profile_times = {
+            'terrain': 0.0,
+            'vegetation': 0.0,
+            'trees': 0.0,
+            'npcs': 0.0,
+            'houses': 0.0,
+            'overlay': 0.0,
+            'total': 0.0
+        }
+        self.profile_frame_count = 0
+        self.profile_log_interval = 120  # Log every 120 frames (2 seconds at 60fps)
+        self.profile_log_file = "profiling.log"  # Log file for profiling data
+        
+        
         # Setup OpenGL
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_BLEND)
@@ -80,6 +121,12 @@ class Renderer:
         self.max_log_lines = 20
         self.debug_colors = False  # Debug flag for color testing
         
+        # Screenshot capture
+        self.screenshot_count = 0
+        import os
+        self.screenshot_dir = "screenshots"
+        os.makedirs(self.screenshot_dir, exist_ok=True)
+        
         # Event handlers
         @self.window.event
         def on_draw():
@@ -97,6 +144,19 @@ class Renderer:
                     self.log("Color debug mode ON - checking nighttime colors")
                 else:
                     self.log("Color debug mode OFF")
+            # Press 'P' to toggle performance profiling
+            if symbol == pyglet.window.key.P:
+                self.profiling = not self.profiling
+                if self.profiling:
+                    self.log("Performance profiling ON - press P again to disable")
+                    # Reset profiling data
+                    self.profile_times = {k: 0.0 for k in self.profile_times}
+                    self.profile_frame_count = 0
+                else:
+                    self.log("Performance profiling OFF")
+            # Press 'S' to capture screenshot
+            if symbol == pyglet.window.key.S:
+                self.capture_screenshot()
         
         @self.window.event
         def on_key_release(symbol, modifiers):
@@ -108,7 +168,24 @@ class Renderer:
             self.mouse_buttons.add(button)
             # Left click for NPC selection
             if button == pyglet.window.mouse.LEFT:
-                self._pick_npc(x, y)
+                # Always try to pick NPC first (don't check panel area initially)
+                clicked_npc = self._pick_npc(x, y)
+                
+                if clicked_npc:
+                    # Successfully clicked on an NPC
+                    self.selected_npc = clicked_npc
+                    self.detail_panel.scroll = 0  # Reset scroll when selecting new NPC
+                    # Reset screenshot flag so we capture when panel is shown
+                    self._panel_screenshot_captured = False
+                else:
+                    # No NPC clicked - check if clicking on panel
+                    if self.detail_panel.is_point_in_panel(x, y) and self.selected_npc:
+                        # Clicking on panel - don't deselect
+                        pass
+                    else:
+                        # Clicking elsewhere - deselect
+                        self.selected_npc = None
+                        self.detail_panel.scroll = 0
         
         @self.window.event
         def on_mouse_release(x, y, button, modifiers):
@@ -132,12 +209,25 @@ class Renderer:
         
         @self.window.event
         def on_mouse_scroll(x, y, scroll_x, scroll_y):
-            # Zoom with mouse wheel
-            self.camera_y += scroll_y * 2.0
-            self.camera_y = max(5.0, self.camera_y)
+            # Check if mouse is over detail panel
+            if self.detail_panel.is_point_in_panel(x, y):
+                # Scroll detail panel when hovering over it
+                self.detail_panel.handle_scroll(x, y, scroll_x, scroll_y)
+            else:
+                # Zoom with mouse wheel when not over panel
+                self.camera_y += scroll_y * 2.0
+                self.camera_y = max(5.0, self.camera_y)
     
     def update(self, delta_time: float):
         """Update camera based on keyboard and mouse."""
+        # Update FPS
+        self.frame_count += 1
+        self.fps_update_time += delta_time
+        if self.fps_update_time >= 0.5:  # Update FPS every 0.5 seconds
+            self.current_fps = self.frame_count / self.fps_update_time
+            self.frame_count = 0
+            self.fps_update_time = 0.0
+        
         move_speed = 20.0 * delta_time
         
         # Calculate forward and right vectors based on camera yaw
@@ -192,6 +282,9 @@ class Renderer:
     
     def render(self):
         """Render the world."""
+        import time
+        frame_start = time.time()
+        
         # Update lighting based on time of day
         light_intensity = self.world.get_light_intensity()
         hour = (self.world.day_time / self.world.day_length) * 24.0
@@ -222,7 +315,7 @@ class Renderer:
         
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
-        gluPerspective(70.0, self.window.width / self.window.height, 0.1, 500.0)
+        gluPerspective(self.fov, self.window.width / self.window.height, self.near_plane, self.far_plane)
         
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
@@ -265,31 +358,203 @@ class Renderer:
             glLightModelfv(GL_LIGHT_MODEL_AMBIENT, (GLfloat * 4)(0.2 * ambient_intensity, 0.2 * ambient_intensity, 0.25 * ambient_intensity, 1.0))
         
         # Render terrain
+        terrain_start = time.time()
         self._render_terrain()
+        terrain_time = time.time() - terrain_start
         
-        # Render vegetation
+        # Render vegetation (optimized with spatial partitioning)
+        veg_start = time.time()
+        # Build spatial grid for this frame
+        veg_grid = {}
         for veg in self.world.vegetation:
-            if veg.is_alive:
-                self._render_vegetation(veg)
+            if not veg.is_alive:
+                continue
+            grid_x = int(veg.x / self.grid_size)
+            grid_z = int(veg.z / self.grid_size)
+            key = (grid_x, grid_z)
+            if key not in veg_grid:
+                veg_grid[key] = []
+            veg_grid[key].append(veg)
         
-        # Render houses
+        # Only check vegetation in nearby grid cells
+        camera_grid_x = int(self.camera_x / self.grid_size)
+        camera_grid_z = int(self.camera_z / self.grid_size)
+        veg_count = 0
+        max_veg_per_frame = 200  # High limit for quality
+        
+        for dx in range(-2, 3):  # Check 5x5 grid cells around camera
+            for dz in range(-2, 3):
+                key = (camera_grid_x + dx, camera_grid_z + dz)
+                if key in veg_grid:
+                    for veg in veg_grid[key]:
+                        if veg_count >= max_veg_per_frame:
+                            break
+                        # Quick distance check
+                        dist_sq = (veg.x - self.camera_x)**2 + (veg.z - self.camera_z)**2
+                        if dist_sq < 10000:  # Within 100 units
+                            self._render_vegetation(veg)
+                            veg_count += 1
+                if veg_count >= max_veg_per_frame:
+                    break
+            if veg_count >= max_veg_per_frame:
+                break
+        veg_time = time.time() - veg_start
+        
+        # Render houses (all within distance)
+        house_start = time.time()
         for house in self.world.houses:
-            self._render_house(house)
+            dx = house.x - self.camera_x
+            dz = house.z - self.camera_z
+            dist_sq = dx*dx + dz*dz
+            if dist_sq < 10000:  # Within 100 units
+                self._render_house(house)
+        house_time = time.time() - house_start
         
-        # Render trees
+        # Render trees (optimized with spatial partitioning)
+        tree_start = time.time()
+        tree_grid = {}
         for tree in self.world.trees:
-            self._render_tree(tree)
+            if not tree.is_alive:
+                continue
+            grid_x = int(tree.x / self.grid_size)
+            grid_z = int(tree.z / self.grid_size)
+            key = (grid_x, grid_z)
+            if key not in tree_grid:
+                tree_grid[key] = []
+            tree_grid[key].append(tree)
         
-        # Render NPCs
+        tree_count = 0
+        max_trees_per_frame = 100  # High limit for quality
+        
+        for dx in range(-2, 3):
+            for dz in range(-2, 3):
+                key = (camera_grid_x + dx, camera_grid_z + dz)
+                if key in tree_grid:
+                    for tree in tree_grid[key]:
+                        if tree_count >= max_trees_per_frame:
+                            break
+                        dist_sq = (tree.x - self.camera_x)**2 + (tree.z - self.camera_z)**2
+                        if dist_sq < 10000:  # Within 100 units
+                            self._render_tree(tree)
+                            tree_count += 1
+                if tree_count >= max_trees_per_frame:
+                    break
+            if tree_count >= max_trees_per_frame:
+                break
+        tree_time = time.time() - tree_start
+        
+        # Render NPCs (optimized with spatial partitioning)
+        npc_start = time.time()
+        npc_grid = {}
         for npc in self.world.entities:
-            self._render_npc(npc)
+            if not npc.is_alive:
+                continue
+            grid_x = int(npc.x / self.grid_size)
+            grid_z = int(npc.z / self.grid_size)
+            key = (grid_x, grid_z)
+            if key not in npc_grid:
+                npc_grid[key] = []
+            npc_grid[key].append(npc)
+        
+        npc_count = 0
+        max_npcs_per_frame = 150  # High limit for quality
+        
+        for dx in range(-2, 3):
+            for dz in range(-2, 3):
+                key = (camera_grid_x + dx, camera_grid_z + dz)
+                if key in npc_grid:
+                    for npc in npc_grid[key]:
+                        if npc_count >= max_npcs_per_frame:
+                            break
+                        dist_sq = (npc.x - self.camera_x)**2 + (npc.z - self.camera_z)**2
+                        if dist_sq < 10000:  # Within 100 units
+                            self._render_npc(npc)
+                            npc_count += 1
+                if npc_count >= max_npcs_per_frame:
+                    break
+            if npc_count >= max_npcs_per_frame:
+                break
+        npc_time = time.time() - npc_start
         
         # Render debug overlay
+        overlay_start = time.time()
         self._render_debug_overlay()
+        overlay_time = time.time() - overlay_start
         
         # Render NPC detail panel if NPC is selected (render after debug overlay for proper layering)
         if self.selected_npc and self.selected_npc.is_alive:
-            self._render_npc_detail_panel()
+            self.detail_panel.render(self.selected_npc)
+            # Auto-capture screenshot once when panel is first shown
+            if not hasattr(self, '_panel_screenshot_captured'):
+                self.capture_screenshot()
+                self._panel_screenshot_captured = True
+        
+        # Update profiling data
+        total_time = time.time() - frame_start
+        self.profile_frame_count += 1
+        
+        # Update rolling averages (every 60 frames)
+        if self.profile_frame_count % 60 == 0:
+            alpha = 0.1  # Smoothing factor
+            self.profile_times['terrain'] = self.profile_times['terrain'] * (1 - alpha) + terrain_time * alpha
+            self.profile_times['vegetation'] = self.profile_times['vegetation'] * (1 - alpha) + veg_time * alpha
+            self.profile_times['trees'] = self.profile_times['trees'] * (1 - alpha) + tree_time * alpha
+            self.profile_times['npcs'] = self.profile_times['npcs'] * (1 - alpha) + npc_time * alpha
+            self.profile_times['houses'] = self.profile_times['houses'] * (1 - alpha) + house_time * alpha
+            self.profile_times['overlay'] = self.profile_times['overlay'] * (1 - alpha) + overlay_time * alpha
+            self.profile_times['total'] = self.profile_times['total'] * (1 - alpha) + total_time * alpha
+            
+            # Log profiling data to console (every N frames for visibility)
+            if self.profiling and total_time > 0 and self.profile_frame_count % self.profile_log_interval == 0:
+                fps = 1.0 / total_time if total_time > 0 else 0
+                avg_fps = 1.0 / self.profile_times['total'] if self.profile_times['total'] > 0 else 0
+                
+                report_lines = []
+                report_lines.append("\n" + "="*60)
+                report_lines.append(f"PERFORMANCE PROFILING REPORT (Frame {self.profile_frame_count})")
+                report_lines.append("="*60)
+                report_lines.append(f"Current FPS: {fps:.1f} | Average FPS (last 60 frames): {avg_fps:.1f}")
+                report_lines.append(f"Target: 60 FPS | Status: {'MEETS TARGET' if fps >= 60 else 'BELOW TARGET'}")
+                report_lines.append("-"*60)
+                report_lines.append(f"Total Frame Time: {total_time*1000:.2f}ms ({100:.0f}%)")
+                report_lines.append(f"  - Terrain:       {terrain_time*1000:.2f}ms ({terrain_time/total_time*100:.1f}%) - Avg: {self.profile_times['terrain']*1000:.2f}ms")
+                report_lines.append(f"  - Vegetation:    {veg_time*1000:.2f}ms ({veg_time/total_time*100:.1f}%) - Avg: {self.profile_times['vegetation']*1000:.2f}ms")
+                report_lines.append(f"  - Trees:         {tree_time*1000:.2f}ms ({tree_time/total_time*100:.1f}%) - Avg: {self.profile_times['trees']*1000:.2f}ms")
+                report_lines.append(f"  - NPCs:          {npc_time*1000:.2f}ms ({npc_time/total_time*100:.1f}%) - Avg: {self.profile_times['npcs']*1000:.2f}ms")
+                report_lines.append(f"  - Houses:        {house_time*1000:.2f}ms ({house_time/total_time*100:.1f}%) - Avg: {self.profile_times['houses']*1000:.2f}ms")
+                report_lines.append(f"  - Overlay:       {overlay_time*1000:.2f}ms ({overlay_time/total_time*100:.1f}%) - Avg: {self.profile_times['overlay']*1000:.2f}ms")
+                report_lines.append("="*60)
+                
+                # Identify bottlenecks
+                components = [
+                    ('Terrain', terrain_time, self.profile_times['terrain']),
+                    ('Vegetation', veg_time, self.profile_times['vegetation']),
+                    ('Trees', tree_time, self.profile_times['trees']),
+                    ('NPCs', npc_time, self.profile_times['npcs']),
+                    ('Houses', house_time, self.profile_times['houses']),
+                    ('Overlay', overlay_time, self.profile_times['overlay']),
+                ]
+                components.sort(key=lambda x: x[1], reverse=True)
+                report_lines.append("\nTop Bottlenecks:")
+                for i, (name, current_time, avg_time) in enumerate(components[:3], 1):
+                    report_lines.append(f"  {i}. {name}: {current_time*1000:.2f}ms ({current_time/total_time*100:.1f}%) - Avg: {avg_time*1000:.2f}ms")
+                report_lines.append("")
+                
+                # Print to console
+                report_text = "\n".join(report_lines)
+                print(report_text)
+                
+                # Write to log file
+                try:
+                    with open(self.profile_log_file, 'a', encoding='utf-8') as f:
+                        f.write(report_text + "\n")
+                except:
+                    pass  # Ignore file write errors
+                
+                # Log to debug overlay as well
+                self.log(f"FPS: {fps:.1f} | Terrain: {terrain_time*1000:.1f}ms ({terrain_time/total_time*100:.0f}%)")
+                self.log(f"Veg: {veg_time*1000:.1f}ms ({veg_time/total_time*100:.0f}%) | Trees: {tree_time*1000:.1f}ms ({tree_time/total_time*100:.0f}%)")
+                self.log(f"NPCs: {npc_time*1000:.1f}ms ({npc_time/total_time*100:.0f}%) | Houses: {house_time*1000:.1f}ms | Overlay: {overlay_time*1000:.1f}ms")
     
     def _render_terrain(self):
         """Render the terrain mesh with colorful grass."""
@@ -324,81 +589,198 @@ class Renderer:
             glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 10.0)
             glColor3f(0.2, 0.5, 0.15)
         
-        # Render terrain mesh using heightmap
-        terrain_size = 200  # Render 200x200 unit area
-        resolution = 50  # 50x50 grid for terrain mesh
+        # Render terrain with high quality LOD system and caching
+        terrain_size = 200  # Full render area
+        base_resolution = 200  # Increased resolution for smoother terrain
         
-        # Render visible area around camera
-        render_start_x = self.camera_x - terrain_size / 2
-        render_start_z = self.camera_z - terrain_size / 2
+        # Use smooth shading for better visual quality
+        glShadeModel(GL_SMOOTH)
         
-        step = terrain_size / resolution
+        # LOD zones: (min_distance, max_distance, resolution)
+        lod_zones = [
+            (0, 60, base_resolution),      # High detail: 0-60 units (200x200 = 40,000 quads)
+            (60, 120, base_resolution // 2),  # Medium detail: 60-120 units (100x100 = 10,000 quads)
+            (120, terrain_size, base_resolution // 4),  # Low detail: 120+ units (50x50 = 2,500 quads)
+        ]
         
-        # Render terrain mesh
-        glBegin(GL_QUADS)
-        for z in range(resolution):
-            for x in range(resolution):
-                world_x1 = render_start_x + x * step
-                world_z1 = render_start_z + z * step
-                world_x2 = render_start_x + (x + 1) * step
-                world_z2 = render_start_z + (z + 1) * step
-                
-                # Get heights at corners
-                h1 = self.world.get_height(world_x1, world_z1)
-                h2 = self.world.get_height(world_x2, world_z1)
-                h3 = self.world.get_height(world_x2, world_z2)
-                h4 = self.world.get_height(world_x1, world_z2)
-                
-                # Get terrain type for color variation
-                terrain_type = self.world.generator.get_terrain_type(
-                    self.world.get_height(world_x1, world_z1) / self.world.generator.max_height
-                )
-                
-                # Adjust color based on terrain type
-                if not is_night:
-                    if terrain_type == 'valley':
-                        glColor3f(0.15, 0.4, 0.1)  # Darker green for valleys
-                    elif terrain_type == 'lowland':
-                        glColor3f(0.2, 0.5, 0.15)  # Normal grass
-                    elif terrain_type == 'hill':
-                        glColor3f(0.25, 0.55, 0.2)  # Lighter green for hills
-                    elif terrain_type == 'mountain':
-                        glColor3f(0.3, 0.35, 0.25)  # Gray-green for mountains
-                    else:  # peak
-                        glColor3f(0.4, 0.4, 0.4)  # Gray for peaks
-                
-                # Calculate normal for lighting
-                dx = world_x2 - world_x1
-                dz = world_z2 - world_z1
-                dh_x = h2 - h1
-                dh_z = h4 - h1
-                
-                # Normal vector (cross product of two edge vectors)
-                # Edge 1: (dx, dh_x, 0)
-                # Edge 2: (0, dh_z, dz)
-                # Cross product = (dh_x * dz, -dx * dz, dx * dh_z)
-                nx = dh_x * dz
-                ny = -dx * dz
-                nz = dx * dh_z
-                
-                # Normalize
-                length = (nx**2 + ny**2 + nz**2) ** 0.5
-                if length > 0.0001:  # Avoid division by zero
-                    nx /= length
-                    ny /= length
-                    nz /= length
-                else:
-                    nx, ny, nz = 0.0, 1.0, 0.0  # Default to up
-                
-                glNormal3f(nx, ny, nz)
-                
-                # Draw quad with correct winding order
-                glVertex3f(world_x1, h1, world_z1)
-                glVertex3f(world_x2, h2, world_z1)
-                glVertex3f(world_x2, h3, world_z2)
-                glVertex3f(world_x1, h4, world_z2)
+        # Check if we can reuse cached terrain display list
+        camera_grid_x = int(self.camera_x / self.terrain_cache_radius)
+        camera_grid_z = int(self.camera_z / self.terrain_cache_radius)
         
-        glEnd()
+        # Invalidate cache if camera moved significantly
+        if (self.last_terrain_x != camera_grid_x or 
+            self.last_terrain_z != camera_grid_z or 
+            self.terrain_display_list is None):
+            
+            # Delete old display list if it exists
+            if self.terrain_display_list is not None:
+                glDeleteLists(self.terrain_display_list, 1)
+            
+            # Create new display list for terrain
+            self.terrain_display_list = glGenLists(1)
+            glNewList(self.terrain_display_list, GL_COMPILE)
+            
+            # Render each LOD zone
+            for zone_min, zone_max, resolution in lod_zones:
+                if resolution < 4:
+                    continue
+                
+                zone_size = zone_max - zone_min
+                if zone_size <= 0:
+                    continue
+                
+                # Calculate zone bounds
+                zone_start_x = self.camera_x - zone_max / 2
+                zone_start_z = self.camera_z - zone_max / 2
+                step = zone_size / resolution
+                
+                # Pre-calculate ALL heights for this zone (single pass)
+                height_grid = {}
+                for z in range(resolution + 1):
+                    for x in range(resolution + 1):
+                        world_x = zone_start_x + x * step
+                        world_z = zone_start_z + z * step
+                        
+                        # Quick squared distance check
+                        dx = world_x - self.camera_x
+                        dz = world_z - self.camera_z
+                        dist_sq = dx*dx + dz*dz
+                        
+                        if dist_sq < zone_min*zone_min or dist_sq >= zone_max*zone_max:
+                            continue
+                        
+                        height_grid[(x, z)] = self.world.get_height(world_x, world_z)
+                
+                # Batch render terrain for this LOD zone
+                glBegin(GL_QUADS)
+                for z in range(resolution):
+                    for x in range(resolution):
+                        world_x1 = zone_start_x + x * step
+                        world_z1 = zone_start_z + z * step
+                        
+                        # Quick squared distance check
+                        dx = world_x1 - self.camera_x
+                        dz = world_z1 - self.camera_z
+                        dist_sq = dx*dx + dz*dz
+                        dist = math.sqrt(dist_sq) if dist_sq > 0 else 0
+                        
+                        if dist < zone_min or dist >= zone_max:
+                            continue
+                        
+                        # Get heights at corners
+                        h1 = height_grid.get((x, z))
+                        h2 = height_grid.get((x + 1, z))
+                        h3 = height_grid.get((x + 1, z + 1))
+                        h4 = height_grid.get((x, z + 1))
+                        
+                        if None in (h1, h2, h3, h4):
+                            continue
+                        
+                        # Get terrain type for color
+                        terrain_type = self.world.generator.get_terrain_type(
+                            h1 / self.world.generator.max_height
+                        )
+                        
+                        # Set color based on terrain type with variety
+                        if not is_night:
+                            if terrain_type == 'water':
+                                glColor3f(0.1, 0.2, 0.4)  # Dark blue water
+                            elif terrain_type == 'sand':
+                                glColor3f(0.7, 0.65, 0.5)  # Light sandy color
+                            elif terrain_type == 'dirt':
+                                glColor3f(0.4, 0.3, 0.2)  # Brown dirt
+                            elif terrain_type == 'grass':
+                                glColor3f(0.2, 0.5, 0.15)  # Green grass
+                            elif terrain_type == 'hill':
+                                glColor3f(0.3, 0.45, 0.2)  # Darker green hills
+                            elif terrain_type == 'mountain':
+                                glColor3f(0.35, 0.35, 0.3)  # Gray-brown mountains
+                            else:  # snow/peak
+                                glColor3f(0.9, 0.9, 0.95)  # Light gray/white snow
+                        else:
+                            # Night colors - darker, cooler tones
+                            if terrain_type == 'water':
+                                glColor3f(0.0, 0.02, 0.04)
+                            elif terrain_type == 'sand':
+                                glColor3f(0.02, 0.02, 0.03)
+                            elif terrain_type == 'dirt':
+                                glColor3f(0.01, 0.02, 0.02)
+                            elif terrain_type == 'grass':
+                                glColor3f(0.0, 0.04, 0.08)
+                            elif terrain_type == 'hill':
+                                glColor3f(0.0, 0.03, 0.06)
+                            elif terrain_type == 'mountain':
+                                glColor3f(0.01, 0.02, 0.03)
+                            else:  # snow/peak
+                                glColor3f(0.05, 0.05, 0.06)
+                        
+                        # Calculate smooth per-vertex normals efficiently (simplified)
+                        # Use gradient-based normal calculation from height grid
+                        h_right = height_grid.get((x + 1, z), h1)
+                        h_left = height_grid.get((x - 1, z), h1) if x > 0 else h1
+                        h_up = height_grid.get((x, z + 1), h1)
+                        h_down = height_grid.get((x, z - 1), h1) if z > 0 else h1
+                        
+                        # Calculate normal from gradients (faster than full cross product)
+                        dh_dx = (h_right - h_left) / (2 * step) if step > 0 else 0
+                        dh_dz = (h_up - h_down) / (2 * step) if step > 0 else 0
+                        nx = -dh_dx
+                        nz = -dh_dz
+                        length_inv = 1.0 / math.sqrt(nx*nx + 1.0 + nz*nz) if (nx*nx + 1.0 + nz*nz) > 0.0001 else 1.0
+                        n1 = (nx * length_inv, 1.0 * length_inv, nz * length_inv)
+                        
+                        # Same calculation for other vertices (can optimize further)
+                        h_right2 = height_grid.get((x + 1, z), h2)
+                        h_left2 = height_grid.get((x - 1, z), h1) if x > 0 else h1
+                        h_up2 = height_grid.get((x + 1, z + 1), h2)
+                        h_down2 = height_grid.get((x + 1, z - 1), h2) if z > 0 else h2
+                        dh_dx2 = (h_right2 - h_left2) / (2 * step) if step > 0 else 0
+                        dh_dz2 = (h_up2 - h_down2) / (2 * step) if step > 0 else 0
+                        nx2 = -dh_dx2
+                        nz2 = -dh_dz2
+                        length_inv2 = 1.0 / math.sqrt(nx2*nx2 + 1.0 + nz2*nz2) if (nx2*nx2 + 1.0 + nz2*nz2) > 0.0001 else 1.0
+                        n2 = (nx2 * length_inv2, 1.0 * length_inv2, nz2 * length_inv2)
+                        
+                        h_right3 = height_grid.get((x + 1, z + 1), h3)
+                        h_left3 = height_grid.get((x, z + 1), h4)
+                        h_up3 = height_grid.get((x + 1, z + 2), h3) if z + 1 < resolution else h3
+                        h_down3 = height_grid.get((x + 1, z), h2)
+                        dh_dx3 = (h_right3 - h_left3) / (2 * step) if step > 0 else 0
+                        dh_dz3 = (h_up3 - h_down3) / (2 * step) if step > 0 else 0
+                        nx3 = -dh_dx3
+                        nz3 = -dh_dz3
+                        length_inv3 = 1.0 / math.sqrt(nx3*nx3 + 1.0 + nz3*nz3) if (nx3*nx3 + 1.0 + nz3*nz3) > 0.0001 else 1.0
+                        n3 = (nx3 * length_inv3, 1.0 * length_inv3, nz3 * length_inv3)
+                        
+                        h_right4 = height_grid.get((x, z + 1), h4)
+                        h_left4 = height_grid.get((x - 1, z + 1), h4) if x > 0 else h4
+                        h_up4 = height_grid.get((x, z + 2), h4) if z + 1 < resolution else h4
+                        h_down4 = height_grid.get((x, z), h1)
+                        dh_dx4 = (h_right4 - h_left4) / (2 * step) if step > 0 else 0
+                        dh_dz4 = (h_up4 - h_down4) / (2 * step) if step > 0 else 0
+                        nx4 = -dh_dx4
+                        nz4 = -dh_dz4
+                        length_inv4 = 1.0 / math.sqrt(nx4*nx4 + 1.0 + nz4*nz4) if (nx4*nx4 + 1.0 + nz4*nz4) > 0.0001 else 1.0
+                        n4 = (nx4 * length_inv4, 1.0 * length_inv4, nz4 * length_inv4)
+                        
+                        # Draw quad with per-vertex normals for smooth shading
+                        glNormal3f(*n1)
+                        glVertex3f(world_x1, h1, world_z1)
+                        glNormal3f(*n2)
+                        glVertex3f(world_x1 + step, h2, world_z1)
+                        glNormal3f(*n3)
+                        glVertex3f(world_x1 + step, h3, world_z1 + step)
+                        glNormal3f(*n4)
+                        glVertex3f(world_x1, h4, world_z1 + step)
+                
+                glEnd()
+            
+            glEndList()
+            self.last_terrain_x = camera_grid_x
+            self.last_terrain_z = camera_grid_z
+        
+        # Render cached terrain display list (much faster than immediate mode)
+        glCallList(self.terrain_display_list)
         
         # Re-enable COLOR_MATERIAL for other objects
         if is_night:
@@ -488,26 +870,26 @@ class Renderer:
             main_foliage_size = 1.2 * tree.growth_stage
             glPushMatrix()
             glTranslatef(0, foliage_base_height, 0)
-            self._draw_sphere(main_foliage_size, 20)
+            self._draw_sphere(main_foliage_size, 10)  # Reduced segments for performance
             glPopMatrix()
             
-            # Secondary foliage clusters for fuller look
+            # Secondary foliage clusters for fuller look (simplified)
             if tree.growth_stage >= 0.7:
                 # Medium cluster slightly lower
                 glPushMatrix()
                 glTranslatef(0, foliage_base_height - 0.3 * tree.growth_stage, 0)
-                self._draw_sphere(main_foliage_size * 0.85, 18)
+                self._draw_sphere(main_foliage_size * 0.85, 8)  # Reduced segments
                 glPopMatrix()
             
             if tree.growth_stage >= 0.85:
-                # Smaller clusters around the sides for natural variation
-                for i in range(3):
-                    angle = (i / 3.0) * 2 * math.pi
+                # Smaller clusters around the sides (only 2 instead of 3 for performance)
+                for i in range(2):  # Reduced from 3 to 2
+                    angle = (i / 2.0) * 2 * math.pi
                     offset_x = math.cos(angle) * 0.4 * tree.growth_stage
                     offset_z = math.sin(angle) * 0.4 * tree.growth_stage
                     glPushMatrix()
                     glTranslatef(offset_x, foliage_base_height - 0.2 * tree.growth_stage, offset_z)
-                    self._draw_sphere(main_foliage_size * 0.6, 14)
+                    self._draw_sphere(main_foliage_size * 0.6, 6)  # Reduced segments
                     glPopMatrix()
             
             # Render fruit - all red, make them more visible
@@ -552,22 +934,22 @@ class Renderer:
                         y_offset = 1.0 + (i % 4) * 0.3
                         fruit_positions.append((x_offset, y_offset, z_offset, False))  # False = growing
                 
-                # Render all fruit pieces (up to 30 visible)
-                for pos in fruit_positions[:30]:
+                # Render all fruit pieces (limit to reduce overhead)
+                for pos in fruit_positions[:20]:  # Reduced from 30 to 20
                     glPushMatrix()
                     glTranslatef(pos[0], trunk_height + pos[1], pos[2])
                     if pos[3]:  # Ripe fruit - larger and brighter
-                        self._draw_sphere(0.18, 12)
+                        self._draw_sphere(0.18, 8)  # Reduced segments
                     else:  # Growing fruit - smaller
                         glColor3f(0.8, 0.2, 0.2)
-                        self._draw_sphere(0.12, 10)
+                        self._draw_sphere(0.12, 6)  # Reduced segments
                         glColor3f(1.0, 0.1, 0.1)  # Reset color
                     glPopMatrix()
         
         glPopMatrix()
     
     def _render_npc(self, npc: NPC):
-        """Render an NPC with a humanoid model."""
+        """Render an NPC with a simplified model for performance."""
         if not npc.is_alive:
             return
         
@@ -590,81 +972,78 @@ class Renderer:
         hunger_ratio = npc.hunger / npc.max_hunger
         
         if is_night:
-            # Cool colors at night - blue-gray tones, minimal red
-            # Base color: health affects brightness, but keep cool tones
-            base_r = 0.1 * (1.0 - health_ratio)  # Very low red
-            base_g = 0.15 * health_ratio + 0.1  # Some green
-            base_b = 0.2 * health_ratio + 0.15  # Blue dominant
-            
-            # Add saturation based on hunger (well-fed = brighter)
+            base_r = 0.1 * (1.0 - health_ratio)
+            base_g = 0.15 * health_ratio + 0.1
+            base_b = 0.2 * health_ratio + 0.15
             saturation = 0.3 + hunger_ratio * 0.3
-            
-            # Final color with saturation - keep cool tones
             r = base_r * saturation
             g = base_g * saturation
             b = base_b * saturation
         else:
-            # Normal colors during day
-            base_r = 1.0 - health_ratio
-            base_g = health_ratio
-            base_b = npc.genome.get('stamina', 100.0) / 150.0
-            
-            saturation = 0.5 + hunger_ratio * 0.5
-            
-            r = 0.3 + base_r * saturation
-            g = 0.3 + base_g * saturation
-            b = 0.3 + base_b * saturation
+            base_g = health_ratio * 0.6 + 0.3
+            base_b = health_ratio * 0.7 + 0.4
+            base_r = (1.0 - health_ratio) * 0.2
+            hunger_factor = hunger_ratio * 0.3
+            stamina_factor = npc.genome.get('stamina', 100.0) / 150.0 * 0.2
+            saturation = 0.6 + hunger_ratio * 0.4
+            r = base_r * saturation
+            g = (base_g + hunger_factor) * saturation
+            b = (base_b + stamina_factor) * saturation
         
-        # Set material properties
+        # Set material properties (batch set once)
         glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, (GLfloat * 4)(r * 0.3, g * 0.3, b * 0.3, 1.0))
         glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, (GLfloat * 4)(r, g, b, 1.0))
         glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, (GLfloat * 4)(0.5, 0.5, 0.5, 1.0))
         glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 30.0)
-        
         glColor3f(r, g, b)
         
         # Scale based on NPC size (children are smaller)
         scale = npc.size
         if hasattr(npc, 'age_stage') and npc.age_stage == "child":
-            scale *= 0.7  # Children are visually smaller
+            scale *= 0.7
         
-        # Head (sphere on top)
+        # Simplified NPC model - batch render all parts together
+        # Head (sphere)
         glPushMatrix()
         glTranslatef(0.0, 0.6 * scale, 0.0)
-        self._draw_sphere(0.15 * scale, 12)
+        self._draw_sphere(0.15 * scale, 8)  # Reduced segments for performance
         glPopMatrix()
         
-        # Body/Torso (cube)
+        # Body/Torso (simplified cube - batch rendered)
         body_height = 0.4 * scale
         body_width = 0.2 * scale
         body_depth = 0.15 * scale
         glPushMatrix()
         glTranslatef(0.0, 0.25 * scale, 0.0)
-        self._draw_box(body_width, body_height, body_depth)
+        self._draw_box_fast(body_width, body_height, body_depth)
         glPopMatrix()
+        
+        # Arms and legs (simplified - fewer quads)
+        arm_size = 0.08 * scale
+        leg_size = 0.1 * scale
         
         # Left arm
         glPushMatrix()
         glTranslatef(-body_width * 1.2, 0.3 * scale, 0.0)
-        self._draw_box(0.08 * scale, 0.3 * scale, 0.08 * scale)
+        self._draw_box_fast(arm_size, 0.3 * scale, arm_size)
         glPopMatrix()
         
         # Right arm
         glPushMatrix()
         glTranslatef(body_width * 1.2, 0.3 * scale, 0.0)
-        self._draw_box(0.08 * scale, 0.3 * scale, 0.08 * scale)
+        self._draw_box_fast(arm_size, 0.3 * scale, arm_size)
         glPopMatrix()
         
         # Left leg
         glPushMatrix()
         glTranslatef(-body_width * 0.6, -0.2 * scale, 0.0)
-        self._draw_box(0.1 * scale, 0.4 * scale, 0.1 * scale)
+        self._draw_box_fast(leg_size, 0.4 * scale, leg_size)
         glPopMatrix()
         
         # Right leg
         glPushMatrix()
         glTranslatef(body_width * 0.6, -0.2 * scale, 0.0)
-        self._draw_box(0.1 * scale, 0.4 * scale, 0.1 * scale)
+        self._draw_box_fast(leg_size, 0.4 * scale, leg_size)
         glPopMatrix()
         
         glPopMatrix()
@@ -676,12 +1055,11 @@ class Renderer:
         if self.selected_npc == npc:
             self._render_npc_highlight(npc)
     
-    def _draw_box(self, width: float, height: float, depth: float):
-        """Draw a box (cube) with proper normals."""
-        w = width / 2.0
-        h = height / 2.0
-        d = depth / 2.0
+    def _draw_box_fast(self, width: float, height: float, depth: float):
+        """Fast box rendering using minimal quads (optimized for performance)."""
+        w, h, d = width/2, height/2, depth/2
         
+        # Render box with fewer quads - only visible faces
         glBegin(GL_QUADS)
         
         # Front face
@@ -712,13 +1090,6 @@ class Renderer:
         glVertex3f(w, -h, d)
         glVertex3f(-w, -h, d)
         
-        # Right face
-        glNormal3f(1.0, 0.0, 0.0)
-        glVertex3f(w, -h, -d)
-        glVertex3f(w, h, -d)
-        glVertex3f(w, h, d)
-        glVertex3f(w, -h, d)
-        
         # Left face
         glNormal3f(-1.0, 0.0, 0.0)
         glVertex3f(-w, -h, -d)
@@ -726,11 +1097,29 @@ class Renderer:
         glVertex3f(-w, h, d)
         glVertex3f(-w, h, -d)
         
+        # Right face
+        glNormal3f(1.0, 0.0, 0.0)
+        glVertex3f(w, -h, -d)
+        glVertex3f(w, h, -d)
+        glVertex3f(w, h, d)
+        glVertex3f(w, -h, d)
+        
         glEnd()
     
+    def _draw_box(self, width: float, height: float, depth: float):
+        """Draw a box (cube) with proper normals."""
+        self._draw_box_fast(width, height, depth)
+    
     def _render_npc_stats(self, npc: NPC):
-        """Render health, hunger, and stamina bars above NPC."""
+        """Render health, hunger, and stamina bars above NPC (optimized)."""
         if not npc.is_alive:
+            return
+        
+        # Only render stats for NPCs near camera to save performance
+        dx = npc.x - self.camera_x
+        dz = npc.z - self.camera_z
+        dist_sq = dx*dx + dz*dz
+        if dist_sq > 2500:  # Only render bars within 50 units
             return
         
         # Calculate screen position (simplified - always render in 3D space above NPC)
@@ -742,19 +1131,15 @@ class Renderer:
         glPushMatrix()
         glTranslatef(npc.x, npc.y + bar_height, npc.z)
         
-        # Make bars face camera (billboard effect)
-        # Calculate direction to camera
+        # Make bars face camera (billboard effect) - simplified
         dx = self.camera_x - npc.x
-        dy = self.camera_y - (npc.y + bar_height)
         dz = self.camera_z - npc.z
-        
-        # Rotate bars to face camera (simplified - just rotate around Y axis)
         angle = math.degrees(math.atan2(dx, dz))
         glRotatef(-angle, 0.0, 1.0, 0.0)
         
         glDisable(GL_LIGHTING)
         
-        # Health bar (red)
+        # Health bar (red background)
         health_ratio = npc.health / npc.max_health
         glColor3f(1.0, 0.0, 0.0)
         glBegin(GL_QUADS)
@@ -773,45 +1158,44 @@ class Renderer:
         glVertex3f(-bar_width/2, bar_thickness, 0.001)
         glEnd()
         
-        # Hunger bar (orange)
+        # Hunger bar (brown background)
         hunger_ratio = npc.hunger / npc.max_hunger
         glColor3f(0.5, 0.3, 0.0)
         glBegin(GL_QUADS)
-        glVertex3f(-bar_width/2, spacing + bar_thickness, 0)
-        glVertex3f(bar_width/2, spacing + bar_thickness, 0)
-        glVertex3f(bar_width/2, spacing + bar_thickness * 2, 0)
-        glVertex3f(-bar_width/2, spacing + bar_thickness * 2, 0)
+        glVertex3f(-bar_width/2, -spacing - bar_thickness, 0)
+        glVertex3f(bar_width/2, -spacing - bar_thickness, 0)
+        glVertex3f(bar_width/2, -spacing, 0)
+        glVertex3f(-bar_width/2, -spacing, 0)
         glEnd()
         
         # Hunger fill (yellow)
         glColor3f(1.0, 0.8, 0.0)
         glBegin(GL_QUADS)
-        glVertex3f(-bar_width/2, spacing + bar_thickness, 0.001)
-        glVertex3f(-bar_width/2 + bar_width * hunger_ratio, spacing + bar_thickness, 0.001)
-        glVertex3f(-bar_width/2 + bar_width * hunger_ratio, spacing + bar_thickness * 2, 0.001)
-        glVertex3f(-bar_width/2, spacing + bar_thickness * 2, 0.001)
+        glVertex3f(-bar_width/2, -spacing - bar_thickness, 0.001)
+        glVertex3f(-bar_width/2 + bar_width * hunger_ratio, -spacing - bar_thickness, 0.001)
+        glVertex3f(-bar_width/2 + bar_width * hunger_ratio, -spacing, 0.001)
+        glVertex3f(-bar_width/2, -spacing, 0.001)
         glEnd()
         
-        # Stamina bar (gray)
-        stamina_ratio = npc.stamina / npc.max_stamina
-        glColor3f(0.3, 0.3, 0.3)
+        # Stamina bar (blue background)
+        stamina_ratio = npc.stamina / npc.max_stamina if npc.max_stamina > 0 else 0
+        glColor3f(0.0, 0.0, 0.5)
         glBegin(GL_QUADS)
-        glVertex3f(-bar_width/2, spacing * 2 + bar_thickness * 2, 0)
-        glVertex3f(bar_width/2, spacing * 2 + bar_thickness * 2, 0)
-        glVertex3f(bar_width/2, spacing * 2 + bar_thickness * 3, 0)
-        glVertex3f(-bar_width/2, spacing * 2 + bar_thickness * 3, 0)
+        glVertex3f(-bar_width/2, -spacing * 2 - bar_thickness * 2, 0)
+        glVertex3f(bar_width/2, -spacing * 2 - bar_thickness * 2, 0)
+        glVertex3f(bar_width/2, -spacing * 2 - bar_thickness, 0)
+        glVertex3f(-bar_width/2, -spacing * 2 - bar_thickness, 0)
         glEnd()
         
-        # Stamina fill (blue)
-        glColor3f(0.0, 0.5, 1.0)
+        # Stamina fill (cyan)
+        glColor3f(0.0, 0.8, 1.0)
         glBegin(GL_QUADS)
-        glVertex3f(-bar_width/2, spacing * 2 + bar_thickness * 2, 0.001)
-        glVertex3f(-bar_width/2 + bar_width * stamina_ratio, spacing * 2 + bar_thickness * 2, 0.001)
-        glVertex3f(-bar_width/2 + bar_width * stamina_ratio, spacing * 2 + bar_thickness * 3, 0.001)
-        glVertex3f(-bar_width/2, spacing * 2 + bar_thickness * 3, 0.001)
+        glVertex3f(-bar_width/2, -spacing * 2 - bar_thickness * 2, 0.001)
+        glVertex3f(-bar_width/2 + bar_width * stamina_ratio, -spacing * 2 - bar_thickness * 2, 0.001)
+        glVertex3f(-bar_width/2 + bar_width * stamina_ratio, -spacing * 2 - bar_thickness, 0.001)
+        glVertex3f(-bar_width/2, -spacing * 2 - bar_thickness, 0.001)
         glEnd()
         
-        glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         glPopMatrix()
     
@@ -1105,9 +1489,10 @@ class Renderer:
         up_z = np.cos(yaw_rad) * np.sin(pitch_rad)
         
         # Calculate ray direction from camera through click point
+        # Fix: properly calculate ray in camera space then transform to world space
         ray_x = forward_x + right_x * norm_x * tan_fov * aspect + up_x * norm_y * tan_fov
-        ray_y = forward_y + right_z * norm_x * tan_fov * aspect + up_y * norm_y * tan_fov
-        ray_z = forward_z + up_z * norm_y * tan_fov
+        ray_y = forward_y + up_y * norm_y * tan_fov
+        ray_z = forward_z + right_z * norm_x * tan_fov * aspect + up_z * norm_y * tan_fov
         
         # Normalize ray direction
         ray_len = np.sqrt(ray_x*ray_x + ray_y*ray_y + ray_z*ray_z)
@@ -1148,20 +1533,21 @@ class Renderer:
                 continue
             
             # NPC bounding sphere radius - increased for easier clicking
-            npc_radius = max(0.8, 0.5 * npc.size)  # Minimum radius of 0.8
+            npc_radius = max(1.2, 0.6 * npc.size)  # Minimum radius of 1.2 for easier selection
             
-            # Check if ray passes close enough to NPC - increased tolerance
+            # Check if ray passes close enough to NPC - increased tolerance for easier clicking
             # Use a larger tolerance based on distance (further NPCs need larger tolerance)
-            tolerance = npc_radius * (3.0 + dist * 0.05)  # Scale tolerance with distance
+            tolerance = npc_radius * (5.0 + dist * 0.1)  # Much larger tolerance for easier clicking
             
             if dist_to_ray < tolerance:
                 if dist < closest_distance:
                     closest_npc = npc
                     closest_distance = dist
         
-        self.selected_npc = closest_npc
         if closest_npc:
-            self.log(f"Selected NPC at ({closest_npc.x:.1f}, {closest_npc.y:.1f}, {closest_npc.z:.1f})")
+            self.log(f"Selected NPC: {closest_npc.name} at ({closest_npc.x:.1f}, {closest_npc.y:.1f}, {closest_npc.z:.1f})")
+        
+        return closest_npc
     
     def _render_npc_highlight(self, npc: NPC):
         """Render a highlight ring around the selected NPC."""
@@ -1192,498 +1578,62 @@ class Renderer:
         glEnable(GL_LIGHTING)
         glPopMatrix()
     
-    def _render_npc_detail_panel(self):
-        """Render a detailed information panel for the selected NPC."""
-        npc = self.selected_npc
-        if not npc or not npc.is_alive:
-            return
-        
-        # Switch to 2D rendering
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glLoadIdentity()
-        glOrtho(0, self.window.width, 0, self.window.height, -1, 1)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glLoadIdentity()
-        
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        
-        # Panel dimensions (increased height to accommodate NN visualization)
-        panel_width = 400
-        panel_height = 750  # Increased from 600
-        panel_x = self.window.width - panel_width - 20
-        panel_y = self.window.height - panel_height - 20
-        
-        # Background panel (semi-transparent dark)
-        glColor4f(0.1, 0.1, 0.15, 0.9)
-        glBegin(GL_QUADS)
-        glVertex2f(panel_x, panel_y)
-        glVertex2f(panel_x + panel_width, panel_y)
-        glVertex2f(panel_x + panel_width, panel_y + panel_height)
-        glVertex2f(panel_x, panel_y + panel_height)
-        glEnd()
-        
-        # Border
-        glColor4f(0.3, 0.6, 1.0, 1.0)  # Blue border
-        glLineWidth(2.0)
-        glBegin(GL_LINE_LOOP)
-        glVertex2f(panel_x, panel_y)
-        glVertex2f(panel_x + panel_width, panel_y)
-        glVertex2f(panel_x + panel_width, panel_y + panel_height)
-        glVertex2f(panel_x, panel_y + panel_height)
-        glEnd()
-        
-        # Prepare text content
-        state_descriptions = {
-            "wandering": "Exploring the world randomly",
-            "seeking_food": "Looking for food sources",
-            "eating": "Consuming fruit from a tree",
-            "resting": "Resting to restore stamina",
-            "seeking_shelter": "Looking for shelter (nighttime)",
-            "in_shelter": "Safe inside a house"
-        }
-        
-        state_desc = state_descriptions.get(npc.state, npc.state)
-        
-        # Health percentage
-        health_pct = (npc.health / npc.max_health) * 100
-        health_status = "Excellent" if health_pct > 80 else "Good" if health_pct > 50 else "Fair" if health_pct > 25 else "Critical"
-        
-        # Hunger percentage
-        hunger_pct = (npc.hunger / npc.max_hunger) * 100
-        hunger_status = "Well Fed" if hunger_pct > 80 else "Satisfied" if hunger_pct > 50 else "Hungry" if hunger_pct > 25 else "Starving"
-        
-        # Stamina percentage
-        stamina_pct = (npc.stamina / npc.max_stamina) * 100 if npc.max_stamina > 0 else 0
-        stamina_status = "Energetic" if stamina_pct > 80 else "Active" if stamina_pct > 50 else "Tired" if stamina_pct > 25 else "Exhausted"
-        
-        # Build text lines (organized to avoid overlap with bars)
-        lines = [
-            f"=== NPC DETAILS ===",
-            f"",
-            f"Name: {npc.name}",
-            f"",
-            f"Status: {npc.state.replace('_', ' ').title()}",
-            f"Description: {state_desc}",
-            f"",
-            f"--- Age & Lifecycle ---",
-            f"Age: {npc.age:.1f}s / {npc.lifespan:.1f}s",
-            f"Age Stage: {npc.age_stage.title()}",
-            f"Adult Age: {npc.adult_age:.1f}s",
-            f"Can Reproduce: {'Yes' if npc.can_reproduce else 'No'}",
-            f"Repro Cooldown: {npc.reproduction_cooldown:.1f}s" if npc.reproduction_cooldown > 0 else "Repro Cooldown: Ready",
-            f"",
-            f"--- Health ---",
-            f"Health: {npc.health:.1f} / {npc.max_health:.1f} ({health_pct:.1f}%)",
-            f"Status: {health_status}",
-            f"",
-            f"--- Hunger ---",
-            f"Hunger: {npc.hunger:.1f} / {npc.max_hunger:.1f} ({hunger_pct:.1f}%)",
-            f"Status: {hunger_status}",
-            f"Note: Hunger decreases over time.",
-            f"Starvation causes health loss.",
-            f"",
-            f"--- Stamina ---",
-            f"Stamina: {npc.stamina:.1f} / {npc.max_stamina:.1f} ({stamina_pct:.1f}%)",
-            f"Status: {stamina_status}",
-            f"Note: Stamina decreases during",
-            f"movement. Rest restores it.",
-            f"",
-            f"--- Physical ---",
-            f"Speed: {npc.speed:.2f}",
-            f"Size: {npc.size:.2f}",
-            f"",
-            f"--- Genetic ---",
-            f"Vision: {npc.genome.get('vision_range', 0):.1f}",
-            f"Food Pref: {npc.genome.get('food_preference', 0):.2f}",
-            f"",
-            f"--- Statistics ---",
-            f"Fruit Collected: {npc.fruit_collected}",
-            f"Position: ({npc.x:.1f}, {npc.y:.1f}, {npc.z:.1f})",
-            f"",
-            f"House: {'Yes' if npc.current_house else 'No'}",
-            f"Target: ({npc.target_x:.1f}, {npc.target_z:.1f})" if npc.target_x else "Target: None",
-            f"",
-            f"Click elsewhere to deselect"
-        ]
-        
-        # Render bars visually (with labels) - positioned at bottom to avoid text overlap
-        bar_x = panel_x + 20
-        bar_y = panel_y + 160  # Positioned at bottom area of panel (above reserved space)
-        bar_width = panel_width - 40
-        bar_height = 15
-        bar_spacing = 50  # Increased spacing between bars
-        bar_label_offset = 18  # Space above bar for label
-        
-        # Health bar with label
-        try:
-            health_label = pyglet.text.Label(
-                "Health:",
-                font_name='Courier New',
-                font_size=10,
-                x=int(bar_x),
-                y=int(bar_y + bar_height + bar_label_offset),
-                anchor_x='left',
-                anchor_y='bottom',
-                color=(255, 255, 255, 255)
-            )
-            health_label.draw()
-        except:
-            pass
-        
-        glColor3f(0.8, 0.0, 0.0)
-        glBegin(GL_QUADS)
-        glVertex2f(bar_x, bar_y)
-        glVertex2f(bar_x + bar_width, bar_y)
-        glVertex2f(bar_x + bar_width, bar_y + bar_height)
-        glVertex2f(bar_x, bar_y + bar_height)
-        glEnd()
-        
-        glColor3f(0.0, 0.8, 0.0)
-        glBegin(GL_QUADS)
-        glVertex2f(bar_x, bar_y)
-        glVertex2f(bar_x + bar_width * (npc.health / npc.max_health), bar_y)
-        glVertex2f(bar_x + bar_width * (npc.health / npc.max_health), bar_y + bar_height)
-        glVertex2f(bar_x, bar_y + bar_height)
-        glEnd()
-        
-        # Hunger bar with label
-        bar_y -= bar_spacing
-        try:
-            hunger_label = pyglet.text.Label(
-                "Hunger:",
-                font_name='Courier New',
-                font_size=10,
-                x=int(bar_x),
-                y=int(bar_y + bar_height + bar_label_offset),
-                anchor_x='left',
-                anchor_y='bottom',
-                color=(255, 255, 255, 255)
-            )
-            hunger_label.draw()
-        except:
-            pass
-        
-        glColor3f(0.5, 0.3, 0.0)
-        glBegin(GL_QUADS)
-        glVertex2f(bar_x, bar_y)
-        glVertex2f(bar_x + bar_width, bar_y)
-        glVertex2f(bar_x + bar_width, bar_y + bar_height)
-        glVertex2f(bar_x, bar_y + bar_height)
-        glEnd()
-        
-        glColor3f(1.0, 0.8, 0.0)
-        glBegin(GL_QUADS)
-        glVertex2f(bar_x, bar_y)
-        glVertex2f(bar_x + bar_width * (npc.hunger / npc.max_hunger), bar_y)
-        glVertex2f(bar_x + bar_width * (npc.hunger / npc.max_hunger), bar_y + bar_height)
-        glVertex2f(bar_x, bar_y + bar_height)
-        glEnd()
-        
-        # Stamina bar with label
-        bar_y -= bar_spacing
-        try:
-            stamina_label = pyglet.text.Label(
-                "Stamina:",
-                font_name='Courier New',
-                font_size=10,
-                x=int(bar_x),
-                y=int(bar_y + bar_height + bar_label_offset),
-                anchor_x='left',
-                anchor_y='bottom',
-                color=(255, 255, 255, 255)
-            )
-            stamina_label.draw()
-        except:
-            pass
-        
-        glColor3f(0.3, 0.3, 0.5)
-        glBegin(GL_QUADS)
-        glVertex2f(bar_x, bar_y)
-        glVertex2f(bar_x + bar_width, bar_y)
-        glVertex2f(bar_x + bar_width, bar_y + bar_height)
-        glVertex2f(bar_x, bar_y + bar_height)
-        glEnd()
-        
-        glColor3f(0.2, 0.4, 1.0)
-        glBegin(GL_QUADS)
-        glVertex2f(bar_x, bar_y)
-        glVertex2f(bar_x + bar_width * (npc.stamina / npc.max_stamina) if npc.max_stamina > 0 else 0, bar_y)
-        glVertex2f(bar_x + bar_width * (npc.stamina / npc.max_stamina) if npc.max_stamina > 0 else 0, bar_y + bar_height)
-        glVertex2f(bar_x, bar_y + bar_height)
-        glEnd()
-        
-        # Restore OpenGL state (but keep 2D matrices for text)
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
-        
-        glPopMatrix()
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-        
-        # Render text labels using pyglet labels - keep 2D matrices active
-        glMatrixMode(GL_PROJECTION)
-        glPushMatrix()
-        glLoadIdentity()
-        glOrtho(0, self.window.width, 0, self.window.height, -1, 1)
-        
-        glMatrixMode(GL_MODELVIEW)
-        glPushMatrix()
-        glLoadIdentity()
-        
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
-        
-        # Calculate text area (leave bottom 350 pixels for bars and NN visualization)
-        bar_area_height = 200  # Space reserved for bars at bottom
-        nn_area_height = 150  # Space for neural network visualization
-        total_bottom_area = bar_area_height + nn_area_height
-        text_start_y = panel_y + panel_height - 20
-        text_end_y = panel_y + total_bottom_area  # Stop text before bar/NN area
-        
-        text_y = text_start_y
-        for i, line in enumerate(lines):
-            # Stop rendering text if we've reached the reserved area
-            if text_y < text_end_y:
-                break
-                
-            if line.strip():
-                # Create and draw label immediately
-                try:
-                    label = pyglet.text.Label(
-                        line,
-                        font_name='Courier New',
-                        font_size=11,
-                        x=int(panel_x + 15),
-                        y=int(text_y),
-                        anchor_x='left',
-                        anchor_y='bottom',
-                        color=(255, 255, 255, 255),
-                        multiline=False
-                    )
-                    label.draw()
-                except:
-                    # Fallback: try with default font
-                    try:
-                        label = pyglet.text.Label(
-                            line,
-                            font_size=11,
-                            x=int(panel_x + 15),
-                            y=int(text_y),
-                            anchor_x='left',
-                            anchor_y='bottom',
-                            color=(255, 255, 255, 255)
-                        )
-                        label.draw()
-                    except:
-                        pass  # Skip if font rendering fails
-                text_y -= 16  # Slightly increased spacing
-            else:
-                text_y -= 6  # Slightly increased spacing for blank lines
-        
-        # Render neural network visualization above bars
-        self._render_neural_network_visualization(npc, panel_x, panel_y + bar_area_height, panel_width, nn_area_height)
-        
-        # Restore OpenGL state
-        glEnable(GL_DEPTH_TEST)
-        glEnable(GL_LIGHTING)
-        
-        glPopMatrix()
-        glMatrixMode(GL_PROJECTION)
-        glPopMatrix()
-        glMatrixMode(GL_MODELVIEW)
-    
-    def _render_neural_network_visualization(self, npc, x, y, width, height):
+    def _is_in_frustum(self, x: float, y: float, z: float, radius: float = 1.0) -> bool:
         """
-        Render a graphical representation of the NPC's neural network.
+        Check if a point (with radius) is within the camera's view frustum.
+        Optimized version using squared distances to avoid sqrt.
         
         Args:
-            npc: NPC instance
-            x: Left position of visualization area
-            y: Bottom position of visualization area
-            width: Width of visualization area
-            height: Height of visualization area
+            x, y, z: World coordinates of the point
+            radius: Bounding sphere radius
+            
+        Returns:
+            True if the point is potentially visible
         """
-        if not hasattr(npc, 'brain'):
-            return
+        # Transform point to camera space
+        dx = x - self.camera_x
+        dy = y - self.camera_y
+        dz = z - self.camera_z
         
-        # Setup 2D rendering (already in 2D mode, but ensure lighting is off)
-        glDisable(GL_LIGHTING)
-        glDisable(GL_DEPTH_TEST)
+        # Calculate squared distance from camera
+        dist_sq = dx*dx + dy*dy + dz*dz
         
-        # Title
-        try:
-            title_label = pyglet.text.Label(
-                "Neural Network Architecture:",
-                font_name='Courier New',
-                font_size=11,
-                x=int(x + 10),
-                y=int(y + height - 15),
-                anchor_x='left',
-                anchor_y='top',
-                color=(200, 200, 255, 255)
-            )
-            title_label.draw()
-        except:
-            pass
+        # Near and far plane culling (using squared distances)
+        if dist_sq < self.near_plane*self.near_plane or dist_sq > self.far_plane*self.far_plane:
+            return False
         
-        # Get network structure
-        brain = npc.brain
+        # Calculate camera forward direction
+        yaw_rad = np.radians(self.camera_yaw)
+        pitch_rad = np.radians(self.camera_pitch)
         
-        # Layer sizes (simplified visualization - show subset of neurons)
-        layer_sizes = [min(12, brain.input_size), 8, 8, 6, 6]  # Reduced for visibility
+        forward_x = math.sin(yaw_rad) * math.cos(pitch_rad)
+        forward_y = -math.sin(pitch_rad)
+        forward_z = -math.cos(yaw_rad) * math.cos(pitch_rad)
         
-        # Calculate positions
-        num_layers = len(layer_sizes)
-        layer_spacing = (width - 40) / max(1, num_layers - 1)
-        neuron_radius = 3.0
-        vis_height = height - 50  # Leave space for title and info
+        # Dot product to check if point is in front of camera (normalized vectors)
+        # Use squared distance to avoid sqrt
+        dist = math.sqrt(dist_sq)  # Only calculate sqrt once for normalization
+        if dist < 0.001:
+            return True  # Very close to camera, always render
         
-        # Draw connections first (so neurons appear on top)
-        glLineWidth(0.5)
-        for layer_idx in range(num_layers - 1):
-            num_neurons_current = layer_sizes[layer_idx]
-            num_neurons_next = layer_sizes[layer_idx + 1]
-            
-            layer_x = x + 20 + layer_idx * layer_spacing
-            next_layer_x = x + 20 + (layer_idx + 1) * layer_spacing
-            
-            # Get weights for this layer connection
-            layer_weights = None
-            try:
-                if layer_idx == 0:
-                    layer_weights = brain.fc1.weight.data.cpu().numpy()
-                elif layer_idx == 1:
-                    layer_weights = brain.fc2.weight.data.cpu().numpy()
-                elif layer_idx == 2:
-                    layer_weights = brain.fc3.weight.data.cpu().numpy()
-                elif layer_idx == 3:
-                    layer_weights = brain.fc_action.weight.data.cpu().numpy()
-                
-                if layer_weights is not None:
-                    # Normalize weights for visualization
-                    weight_max = max(abs(layer_weights.max()), abs(layer_weights.min()))
-                    if weight_max > 0:
-                        layer_weights = layer_weights / weight_max
-            except:
-                layer_weights = None
-            
-            for neuron_idx_current in range(num_neurons_current):
-                neuron_y_current = y + 20 + (neuron_idx_current + 1) * vis_height / (num_neurons_current + 1)
-                
-                for neuron_idx_next in range(num_neurons_next):
-                    neuron_y_next = y + 20 + (neuron_idx_next + 1) * vis_height / (num_neurons_next + 1)
-                    
-                    # Get weight strength
-                    if layer_weights is not None and neuron_idx_current < layer_weights.shape[1] and neuron_idx_next < layer_weights.shape[0]:
-                        weight = layer_weights[neuron_idx_next, neuron_idx_current]
-                    else:
-                        weight = 0.0
-                    
-                    # Color based on weight (green = positive, red = negative, gray = near zero)
-                    weight_abs = abs(weight)
-                    if weight_abs < 0.1:
-                        glColor4f(0.2, 0.2, 0.2, 0.1)  # Very faint gray
-                    elif weight > 0:
-                        glColor4f(0.0, 0.6, 0.0, min(0.6, weight_abs * 0.8))  # Green for positive
-                    else:
-                        glColor4f(0.6, 0.0, 0.0, min(0.6, weight_abs * 0.8))  # Red for negative
-                    
-                    glBegin(GL_LINES)
-                    glVertex2f(layer_x, neuron_y_current)
-                    glVertex2f(next_layer_x, neuron_y_next)
-                    glEnd()
+        vec_x = dx / dist
+        vec_y = dy / dist
+        vec_z = dz / dist
         
-        # Draw neurons (circles)
-        for layer_idx in range(num_layers):
-            num_neurons = layer_sizes[layer_idx]
-            layer_x = x + 20 + layer_idx * layer_spacing
-            
-            # Layer label
-            layer_names = ["Input", "Hidden1", "Hidden2", "Hidden3", "Output"]
-            layer_name = layer_names[layer_idx] if layer_idx < len(layer_names) else f"Layer{layer_idx}"
-            try:
-                label = pyglet.text.Label(
-                    layer_name,
-                    font_name='Courier New',
-                    font_size=8,
-                    x=int(layer_x),
-                    y=int(y + height - 25),
-                    anchor_x='center',
-                    anchor_y='top',
-                    color=(255, 255, 255, 255)
-                )
-                label.draw()
-            except:
-                pass
-            
-            # Draw neurons in this layer
-            for neuron_idx in range(num_neurons):
-                neuron_y = y + 20 + (neuron_idx + 1) * vis_height / (num_neurons + 1)
-                
-                # Neuron color based on layer
-                if layer_idx == 0:
-                    glColor3f(0.3, 0.7, 1.0)  # Blue for input
-                elif layer_idx == num_layers - 1:
-                    glColor3f(1.0, 0.8, 0.3)  # Yellow for output
-                else:
-                    glColor3f(0.5, 0.9, 0.5)  # Green for hidden
-                
-                # Draw neuron circle
-                import math
-                num_segments = 12
-                glBegin(GL_TRIANGLE_FAN)
-                glVertex2f(layer_x, neuron_y)
-                for i in range(num_segments + 1):
-                    angle = (i / num_segments) * 2 * math.pi
-                    glVertex2f(
-                        layer_x + neuron_radius * math.cos(angle),
-                        neuron_y + neuron_radius * math.sin(angle)
-                    )
-                glEnd()
-                
-                # Neuron border
-                glColor3f(1.0, 1.0, 1.0)
-                glLineWidth(1.0)
-                glBegin(GL_LINE_LOOP)
-                for i in range(num_segments):
-                    angle = (i / num_segments) * 2 * math.pi
-                    glVertex2f(
-                        layer_x + neuron_radius * math.cos(angle),
-                        neuron_y + neuron_radius * math.sin(angle)
-                    )
-                glEnd()
+        dot = vec_x * forward_x + vec_y * forward_y + vec_z * forward_z
         
-        # Add legend/info
-        try:
-            info_lines = [
-                f"Input: {brain.input_size} features",
-                f"Hidden: 64→64→32",
-                f"Output: 6 actions",
-                f"Lines: Green=positive, Red=negative"
-            ]
-            info_y = y + 5
-            for i, info_line in enumerate(info_lines):
-                info_label = pyglet.text.Label(
-                    info_line,
-                    font_name='Courier New',
-                    font_size=8,
-                    x=int(x + 10),
-                    y=int(info_y - i * 12),
-                    anchor_x='left',
-                    anchor_y='top',
-                    color=(180, 180, 180, 255)
-                )
-                info_label.draw()
-        except:
-            pass
+        # FOV-based culling (simplified cone check)
+        fov_rad = math.radians(self.fov / 2.0)
+        cos_fov = math.cos(fov_rad)
+        
+        # If point is behind camera or outside FOV cone, cull it
+        if dot < cos_fov - (radius / dist if dist > radius else 0):
+            return False
+        
+        return True
     
     def _render_debug_overlay(self):
-        """Render debug information overlay."""
+        """Render debug information overlay (optimized for performance)."""
         # Switch to 2D rendering
         glMatrixMode(GL_PROJECTION)
         glPushMatrix()
@@ -1694,71 +1644,63 @@ class Renderer:
         glPushMatrix()
         glLoadIdentity()
         
-        # Disable lighting and depth test for text
-        glDisable(GL_LIGHTING)
         glDisable(GL_DEPTH_TEST)
+        glDisable(GL_LIGHTING)
         
-        # Render text
+        # Background for debug text
+        bg_y = self.window.height - 20
+        bg_height = 200  # Reduced height
+        
+        # Show profiling info if enabled
+        if self.profiling:
+            bg_height = 280  # Reduced but enough for profiling
+        
+        glColor4f(0.0, 0.0, 0.0, 0.7)
+        glBegin(GL_QUADS)
+        glVertex2f(10, bg_y - bg_height)
+        glVertex2f(350, bg_y - bg_height)
+        glVertex2f(350, bg_y)
+        glVertex2f(10, bg_y)
+        glEnd()
+        
+        # Simplified debug text - only essential info
+        time_str = f"Day {self.world.day_number}, "
         hour = (self.world.day_time / self.world.day_length) * 24.0
-        time_str = f"Day {self.world.day_number + 1} - {hour:.1f}h ({'Night' if self.world.is_night() else 'Day'})"
-        alive_count = sum(1 for npc in self.world.entities if npc.is_alive)
+        time_str += f"{int(hour):02d}:{int((hour % 1) * 60):02d}"
         
-        # Calculate current color values for debugging
-        is_night = hour < 6.0 or hour >= 18.0
-        if is_night:
-            terrain_r, terrain_g, terrain_b = 0.0, 0.04, 0.08
-            sky_r, sky_g, sky_b = 0.03, 0.03, 0.12
-            color_info = f"Night Colors - Terrain: RGB({terrain_r:.2f},{terrain_g:.3f},{terrain_b:.3f}) Sky: RGB({sky_r:.2f},{sky_g:.2f},{sky_b:.2f})"
-        else:
-            terrain_r, terrain_g, terrain_b = 0.2, 0.5, 0.15
-            sky_r, sky_g, sky_b = 0.5, 0.7, 1.0
-            color_info = f"Day Colors - Terrain: RGB({terrain_r:.2f},{terrain_g:.2f},{terrain_b:.2f}) Sky: RGB({sky_r:.2f},{sky_g:.2f},{sky_b:.2f})"
-        
+        # Minimal stats - avoid expensive list comprehensions
         stats = [
-            f"World Simulation Debug",
+            f"FPS: {self.current_fps:.1f}",
             f"Time: {time_str}",
-            f"NPCs Alive: {alive_count}/{len(self.world.entities)}",
-            f"Trees: {len([t for t in self.world.trees if t.is_alive])}",
-            f"Houses: {len(self.world.houses)}",
-            f"Light Intensity: {self.world.get_light_intensity():.2f}",
-            f"",
-            f"Color Info: {color_info}",
-            f"Press 'T' to toggle color debug logs",
-            f"",
-            f"NPC States:",
+            f"Entities: {sum(1 for e in self.world.entities if e.is_alive)}",
         ]
         
-        # Count NPC states
-        state_counts = {}
-        for npc in self.world.entities:
-            if npc.is_alive:
-                state_counts[npc.state] = state_counts.get(npc.state, 0) + 1
+        # Add profiling stats if enabled (simplified)
+        if self.profiling and self.profile_times['total'] > 0:
+            avg_fps = 1.0 / self.profile_times['total'] if self.profile_times['total'] > 0 else 0
+            stats.extend([
+                f"Avg FPS: {avg_fps:.1f}",
+                f"Terrain: {self.profile_times['terrain']*1000:.1f}ms",
+                f"NPCs: {self.profile_times['npcs']*1000:.1f}ms",
+                f"Overlay: {self.profile_times['overlay']*1000:.1f}ms",
+            ])
         
-        for state, count in sorted(state_counts.items()):
-            stats.append(f"  {state}: {count}")
-        
-        # Add recent log entries
-        stats.append("")
-        stats.append("Recent Events:")
-        for log_entry in self.debug_log[-5:]:
-            stats.append(f"  {log_entry}")
-        
-        # Render text
+        # Render minimal text (single label for performance)
+        stats_text = '\n'.join(stats)
         label = pyglet.text.Label(
-            '\n'.join(stats),
+            stats_text,
             font_name='Courier New',
             font_size=12,
-            x=10,
-            y=self.window.height - 10,
+            x=20,
+            y=bg_y - 20,
             anchor_x='left',
             anchor_y='top',
             color=(255, 255, 255, 255),
             multiline=True,
-            width=self.window.width - 20
+            width=330
         )
         label.draw()
         
-        # Restore OpenGL state
         glEnable(GL_DEPTH_TEST)
         glEnable(GL_LIGHTING)
         
@@ -1766,6 +1708,30 @@ class Renderer:
         glMatrixMode(GL_PROJECTION)
         glPopMatrix()
         glMatrixMode(GL_MODELVIEW)
+    
+    def capture_screenshot(self):
+        """Capture a screenshot of the current window."""
+        try:
+            import os
+            from datetime import datetime
+            
+            # Get buffer and convert to image
+            buffer = pyglet.image.get_buffer_manager().get_color_buffer()
+            image_data = buffer.get_image_data()
+            
+            # Save screenshot
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"screenshot_{timestamp}_{self.screenshot_count:03d}.png"
+            filepath = os.path.join(self.screenshot_dir, filename)
+            
+            image_data.save(filepath)
+            self.screenshot_count += 1
+            
+            self.log(f"Screenshot saved: {filepath}")
+            print(f"Screenshot saved: {filepath}")
+        except Exception as e:
+            self.log(f"Failed to capture screenshot: {e}")
+            print(f"Failed to capture screenshot: {e}")
     
     def log(self, message: str):
         """Add a message to the debug log."""
@@ -1773,31 +1739,28 @@ class Renderer:
         if len(self.debug_log) > self.max_log_lines:
             self.debug_log.pop(0)
     
-    def _draw_sphere(self, radius: float, segments: int):
-        """Draw a sphere with proper normals for lighting."""
+    def _draw_sphere(self, radius: float, segments: int = 12):
+        """Draw a sphere (optimized - reduced segments for performance)."""
+        # Use fewer segments for better performance - cap at 10
+        segments = max(6, min(segments, 10))  # Cap at 10 segments for performance
+        
         for i in range(segments):
-            angle1 = i * 2 * math.pi / segments
-            angle2 = (i + 1) * 2 * math.pi / segments
+            lat1 = (math.pi / 2.0) - (i * math.pi / segments)
+            lat2 = (math.pi / 2.0) - ((i + 1) * math.pi / segments)
             
-            glBegin(GL_TRIANGLE_STRIP)
-            for j in range(segments // 2 + 1):
-                theta = j * math.pi / (segments // 2)
-                sin_theta = math.sin(theta)
-                cos_theta = math.cos(theta)
+            glBegin(GL_QUAD_STRIP)
+            for j in range(segments + 1):
+                lng = 2 * math.pi * j / segments
+                x1 = radius * math.cos(lat1) * math.cos(lng)
+                y1 = radius * math.sin(lat1)
+                z1 = radius * math.cos(lat1) * math.sin(lng)
                 
-                # First vertex
-                x1 = radius * sin_theta * math.cos(angle1)
-                y1 = radius * cos_theta
-                z1 = radius * sin_theta * math.sin(angle1)
-                # Normal (points outward from center)
-                glNormal3f(x1 / radius, y1 / radius, z1 / radius)
+                x2 = radius * math.cos(lat2) * math.cos(lng)
+                y2 = radius * math.sin(lat2)
+                z2 = radius * math.cos(lat2) * math.sin(lng)
+                
+                glNormal3f(x1/radius, y1/radius, z1/radius)
                 glVertex3f(x1, y1, z1)
-                
-                # Second vertex
-                x2 = radius * sin_theta * math.cos(angle2)
-                y2 = radius * cos_theta
-                z2 = radius * sin_theta * math.sin(angle2)
-                # Normal
-                glNormal3f(x2 / radius, y2 / radius, z2 / radius)
+                glNormal3f(x2/radius, y2/radius, z2/radius)
                 glVertex3f(x2, y2, z2)
             glEnd()

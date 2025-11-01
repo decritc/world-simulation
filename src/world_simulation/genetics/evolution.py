@@ -20,12 +20,13 @@ class EvolutionEngine:
         self.population_size = population_size
         self.generation = 0
         
-    def create_initial_population(self, spawn_points: List[Tuple[float, float, float]]) -> List[NPC]:
+    def create_initial_population(self, spawn_points: List[Tuple[float, float, float]], world=None) -> List[NPC]:
         """
         Create the initial population of NPCs.
         
         Args:
             spawn_points: List of (x, y, z) spawn points
+            world: World instance (optional, for terrain height calculation)
             
         Returns:
             List of NPCs
@@ -41,6 +42,9 @@ class EvolutionEngine:
                 x, y, z = spawn_points[idx]
                 x += np.random.uniform(-5, 5)
                 z += np.random.uniform(-5, 5)
+                # Recalculate Y based on terrain if world is provided
+                if world is not None:
+                    y = world.get_height(x, z)
             
             npc = NPC(x, y, z)
             population.append(npc)
@@ -141,13 +145,14 @@ class EvolutionEngine:
         
         return mutated_genome
     
-    def evolve(self, population: List[NPC], spawn_points: List[Tuple[float, float, float]]) -> List[NPC]:
+    def evolve(self, population: List[NPC], spawn_points: List[Tuple[float, float, float]], world=None) -> List[NPC]:
         """
         Evolve the population to create the next generation.
         
         Args:
             population: Current population of NPCs
             spawn_points: Spawn points for new generation
+            world: World instance (optional, for terrain height calculation)
             
         Returns:
             New generation of NPCs
@@ -188,6 +193,9 @@ class EvolutionEngine:
                 x, y, z = spawn_points[0]
                 x += np.random.uniform(-5, 5)
                 z += np.random.uniform(-5, 5)
+                # Recalculate Y based on terrain if world is provided
+                if world is not None:
+                    y = world.get_height(x, z)
             
             new_npc = NPC(x, y, z, child_genome)
             new_population.append(new_npc)

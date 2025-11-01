@@ -14,9 +14,9 @@ class TestEnhancedTerrainGeneration:
         """Test generator initialization with terrain parameters."""
         generator = WorldGenerator(seed=42)
         
-        assert generator.max_height == 25.0
-        assert generator.hill_height == 8.0
-        assert generator.terrain_scale == 80.0
+        assert generator.max_height == 15.0  # Updated for smoother terrain
+        assert generator.hill_height == 6.0
+        assert generator.terrain_scale == 150.0  # Updated for smoother terrain
         assert generator.seed == 42
     
     def test_heightmap_generation_creates_variation(self):
@@ -63,14 +63,16 @@ class TestEnhancedTerrainGeneration:
         assert not np.allclose(chunk1, chunk3)
     
     def test_get_terrain_type(self):
-        """Test terrain type classification."""
+        """Test terrain type classification with new types."""
         generator = WorldGenerator(seed=42)
         
-        assert generator.get_terrain_type(0.1) == 'valley'
-        assert generator.get_terrain_type(0.3) == 'lowland'
-        assert generator.get_terrain_type(0.5) == 'hill'
-        assert generator.get_terrain_type(0.7) == 'mountain'
-        assert generator.get_terrain_type(0.9) == 'peak'
+        assert generator.get_terrain_type(0.1) == 'water'
+        assert generator.get_terrain_type(0.2) == 'sand'
+        assert generator.get_terrain_type(0.3) == 'dirt'
+        assert generator.get_terrain_type(0.45) == 'grass'
+        assert generator.get_terrain_type(0.55) == 'hill'
+        assert generator.get_terrain_type(0.75) == 'mountain'
+        assert generator.get_terrain_type(0.9) == 'snow'
     
     def test_vegetation_noise_generation(self):
         """Test vegetation noise generation."""

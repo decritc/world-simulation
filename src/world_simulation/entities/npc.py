@@ -492,7 +492,8 @@ class NPC:
         house = self.current_house
         spawn_x = house.x + np.random.uniform(-1.0, 1.0)
         spawn_z = house.z + np.random.uniform(-1.0, 1.0)
-        spawn_y = 0.0  # Will be set by world.get_height
+        # spawn_y will be set by world.update after creation
+        spawn_y = house.y  # Use house Y as initial guess
         
         # Create offspring
         offspring = NPC(spawn_x, spawn_y, spawn_z, genome=offspring_genome)

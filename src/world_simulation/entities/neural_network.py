@@ -120,6 +120,7 @@ class FeatureExtractor:
         'wandering': 0,
         'seeking_food': 1,
         'eating': 2,
+        'hunting': 2,  # Map hunting to same as eating (can be refined later)
         'resting': 3,
         'seeking_shelter': 4,
         'in_shelter': 5,
@@ -161,9 +162,11 @@ class FeatureExtractor:
         is_night = 1.0 if world.is_night() else 0.0
         features.append(is_night)
         
-        # Find nearest food source
+        # Find nearest food source (trees or animals)
         vision_range = npc.genome.get('vision_range', 10.0)
         nearest_food_dist = vision_range  # Default to max vision
+        
+        # Check trees
         for tree in world.trees:
             if tree.is_alive and tree.get_ripe_fruit_count() > 0:
                 dx = tree.x - npc.x
@@ -171,6 +174,23 @@ class FeatureExtractor:
                 dist = np.sqrt(dx**2 + dz**2)
                 if dist < nearest_food_dist:
                     nearest_food_dist = dist
+        
+        # Check animals (prefer animals if very hungry)
+        prefer_animal = npc.hunger < 40.0
+        nearest_animal_dist = vision_range
+        for animal in world.animals:
+            if animal.is_alive:
+                dx = animal.x - npc.x
+                dz = animal.z - npc.z
+                dist = np.sqrt(dx**2 + dz**2)
+                if dist < nearest_animal_dist:
+                    nearest_animal_dist = dist
+        
+        # Use closer food source
+        if prefer_animal and nearest_animal_dist < vision_range:
+            nearest_food_dist = min(nearest_food_dist, nearest_animal_dist)
+        else:
+            nearest_food_dist = min(nearest_food_dist, nearest_animal_dist)
         
         # Normalize distance (0 = nearby, 1 = far)
         features.append(min(1.0, nearest_food_dist / vision_range))

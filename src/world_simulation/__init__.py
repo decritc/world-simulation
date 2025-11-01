@@ -17,7 +17,7 @@ def main() -> None:
     world = World(seed=42)
     
     # Create renderer
-    renderer = Renderer(world)
+    renderer = Renderer(world, width=1920, height=1080)
     
     # Create evolution engine
     evolution_engine = EvolutionEngine(population_size=30)
@@ -44,6 +44,15 @@ def main() -> None:
     
     world.entities = evolution_engine.create_initial_population(spawn_points, world=world)
     
+    # Register initial population births
+    for npc in world.entities:
+        world.historian.register_npc_birth(
+            id(npc), npc.name,
+            None, None,  # Initial population has no parents
+            world.time, world.day_number
+        )
+        world.all_npcs.append(npc)
+    
     # Make initial population adults for faster start
     for npc in world.entities:
         if npc.age < npc.adult_age:
@@ -51,6 +60,13 @@ def main() -> None:
             npc.age_stage = "adult"
             npc.can_reproduce = True
             npc.size = npc.genome.get('size', 1.0)  # Full size as adult
+            
+            # Log milestone for initial adults
+            world.historian.register_milestone(
+                id(npc), npc.name, "reached_adult",
+                world.time, world.day_number,
+                "Initial population member"
+            )
     
     # Initialize houses (capacity 2 for adults only)
     for i in range(5):

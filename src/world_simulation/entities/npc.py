@@ -47,6 +47,7 @@ class NPC:
         self.target_x = None
         self.target_z = None
         self.target_tree = None  # Target tree for eating
+        self.target_animal = None  # Target animal for hunting
         self.state = "wandering"  # Current state (for compatibility/rendering)
         self.current_house = None  # House NPC is currently in
         
@@ -84,6 +85,7 @@ class NPC:
         
         # Statistics
         self.fruit_collected = 0
+        self.animals_hunted = 0
         self.is_alive = True
         
         # Name generation
@@ -123,6 +125,14 @@ class NPC:
             # Grow to full size when becoming adult
             if hasattr(self, 'genome'):
                 self.size = self.genome.get('size', 1.0)
+            
+            # Log milestone
+            if hasattr(world, 'historian'):
+                world.historian.register_milestone(
+                    id(self), self.name, "reached_adult",
+                    world.time, world.day_number,
+                    f"Age: {self.age:.1f} seconds"
+                )
         elif self.age >= self.elder_age and self.age_stage == "adult":
             self.age_stage = "elder"
         
@@ -194,6 +204,8 @@ class NPC:
             self._seek_food(delta_time, world)
         elif self.state == "eating":
             self._eat(delta_time, world)
+        elif self.state == "hunting":
+            self._hunt_animal(delta_time, world)
         elif self.state == "resting":
             if self.stamina >= self.max_stamina * 0.8:
                 self.state = "wandering"
@@ -257,6 +269,12 @@ class NPC:
         # Update state based on neural network decision
         # But respect constraints (e.g., can't eat if no food nearby, can't seek shelter if child)
         if predicted_action == "eating" and (self.target_tree is None or self.target_tree.get_ripe_fruit_count() == 0):
+            if self.target_animal and self.target_animal.is_alive:
+                predicted_action = "hunting"
+            else:
+                predicted_action = "seeking_food"
+        
+        if predicted_action == "hunting" and (self.target_animal is None or not self.target_animal.is_alive):
             predicted_action = "seeking_food"
         
         if predicted_action == "seeking_shelter" and self.age_stage != "adult":
@@ -315,7 +333,7 @@ class NPC:
             self.state = "resting"
     
     def _seek_shelter(self, delta_time: float, world):
-        """Seek out a house for shelter."""
+        """Seek out a house for shelter, approaching the door."""
         vision_range = self.genome.get('vision_range', 10.0) * 1.5  # Better vision for shelter
         
         # Find nearest house with space
@@ -325,41 +343,62 @@ class NPC:
         for house in world.houses:
             # Only adults can occupy houses (capacity is 2 adults)
             if house.is_built and house.can_shelter_adult() and self.age_stage == "adult":
-                dx = house.x - self.x
-                dz = house.z - self.z
-                distance = np.sqrt(dx**2 + dz**2)
+                # Use distance to door instead of house center
+                distance = house.distance_to_door(self.x, self.z)
                 
                 if distance < vision_range and distance < nearest_distance:
                     nearest_distance = distance
                     nearest_house = house
         
         if nearest_house:
-            # Move towards house
-            dx = nearest_house.x - self.x
-            dz = nearest_house.z - self.z
+            # Move towards door specifically
+            door_x, door_y, door_z = nearest_house.get_door_position()
+            dx = door_x - self.x
+            dz = door_z - self.z
             distance = np.sqrt(dx**2 + dz**2)
             
-            if distance < 1.5:
+            if distance < 0.8:  # Close enough to door to enter
                 # Enter house
                 if nearest_house.add_occupant(id(self)):
                     self.current_house = nearest_house
                     self.state = "in_shelter"
+                    # Position NPC at house center when inside
+                    self.x = nearest_house.x
+                    self.z = nearest_house.z
+                    self.y = nearest_house.y
             else:
+                # Move towards door
                 move_speed = self.speed * delta_time
-                self.x += (dx / distance) * move_speed
-                self.z += (dz / distance) * move_speed
-                self.y = world.get_height(self.x, self.z)
+                if distance > 0.01:
+                    self.x += (dx / distance) * move_speed
+                    self.z += (dz / distance) * move_speed
+                    self.y = world.get_height(self.x, self.z)
         else:
             # No shelter found, keep wandering (will try again next frame)
             pass
     
     def _seek_food(self, delta_time: float, world):
-        """Seek out fruit trees."""
+        """Seek out fruit trees or animals."""
         vision_range = self.genome.get('vision_range', 10.0)
+        
+        # Find nearest animal (prefer animals if hungry enough)
+        nearest_animal = None
+        nearest_animal_distance = float('inf')
+        prefer_animal = self.hunger < 40.0  # Prefer animals when very hungry
+        
+        for animal in world.animals:
+            if animal.is_alive:
+                dx = animal.x - self.x
+                dz = animal.z - self.z
+                distance = np.sqrt(dx**2 + dz**2)
+                
+                if distance < vision_range and distance < nearest_animal_distance:
+                    nearest_animal_distance = distance
+                    nearest_animal = animal
         
         # Find nearest tree with fruit
         nearest_tree = None
-        nearest_distance = float('inf')
+        nearest_tree_distance = float('inf')
         
         for tree in world.trees:
             if tree.is_alive and tree.get_ripe_fruit_count() > 0:
@@ -367,12 +406,18 @@ class NPC:
                 dz = tree.z - self.z
                 distance = np.sqrt(dx**2 + dz**2)
                 
-                if distance < vision_range and distance < nearest_distance:
-                    nearest_distance = distance
+                if distance < vision_range and distance < nearest_tree_distance:
+                    nearest_tree_distance = distance
                     nearest_tree = tree
         
-        if nearest_tree:
-            # Move towards tree
+        # Decide what to pursue (prefer animals if very hungry, otherwise prefer closer option)
+        if prefer_animal and nearest_animal and nearest_animal_distance < vision_range:
+            # Hunt animal
+            self.target_animal = nearest_animal
+            self.target_tree = None
+            self.state = "hunting"
+        elif nearest_tree and nearest_tree_distance < vision_range:
+            # Go to tree
             dx = nearest_tree.x - self.x
             dz = nearest_tree.z - self.z
             distance = np.sqrt(dx**2 + dz**2)
@@ -380,17 +425,84 @@ class NPC:
             if distance < 1.5:
                 self.state = "eating"
                 self.target_tree = nearest_tree
+                self.target_animal = None
             else:
                 move_speed = self.speed * delta_time
                 self.x += (dx / distance) * move_speed
                 self.z += (dz / distance) * move_speed
                 self.y = world.get_height(self.x, self.z)
+        elif nearest_animal and nearest_animal_distance < vision_range:
+            # Hunt animal as fallback
+            self.target_animal = nearest_animal
+            self.target_tree = None
+            self.state = "hunting"
         else:
             # No food found, go back to wandering
             self.state = "wandering"
+            self.target_tree = None
+            self.target_animal = None
+    
+    def _hunt_animal(self, delta_time: float, world):
+        """Hunt and kill an animal."""
+        if self.target_animal and self.target_animal.is_alive:
+            animal = self.target_animal
+            
+            # Move towards animal
+            dx = animal.x - self.x
+            dz = animal.z - self.z
+            distance = np.sqrt(dx**2 + dz**2)
+            
+            if distance < 1.5:  # Close enough to attack
+                # Attack the animal (deal damage)
+                attack_damage = delta_time * 30.0  # Deal 30 damage per second
+                animal.take_damage(attack_damage)
+                
+                if not animal.is_alive:
+                    # Animal killed, eat it
+                    self.hunger = min(self.max_hunger, self.hunger + animal.meat_value)
+                    self.animals_hunted += 1
+                    
+                    # Log milestone for first hunt
+                    if self.animals_hunted == 1 and hasattr(world, 'historian'):
+                        world.historian.register_milestone(
+                            id(self), self.name, "first_hunt",
+                            world.time, world.day_number,
+                            f"Hunted: {animal.species}"
+                        )
+                    
+                    # Log achievement for significant hunting
+                    if self.animals_hunted % 5 == 0 and hasattr(world, 'historian'):
+                        world.historian.register_achievement(
+                            id(self), self.name, "hunting_milestone",
+                            self.animals_hunted, world.time, world.day_number
+                        )
+                    
+                    self.state = "wandering"
+                    self.target_animal = None
+                    return
+            else:
+                # Chase the animal
+                move_speed = self.speed * 1.2 * delta_time  # Slightly faster when hunting
+                self.x += (dx / distance) * move_speed
+                self.z += (dz / distance) * move_speed
+                self.y = world.get_height(self.x, self.z)
+        else:
+            # Animal is dead or escaped, seek new food
+            self.target_animal = None
+            self.state = "seeking_food"
     
     def _eat(self, delta_time: float, world):
-        """Eat fruit from a tree."""
+        """Eat fruit from a tree or animal meat."""
+        # Check if eating animal
+        if self.target_animal and not self.target_animal.is_alive:
+            # Animal is dead, consume it
+            self.hunger = min(self.max_hunger, self.hunger + self.target_animal.meat_value)
+            self.animals_hunted += 1
+            self.target_animal = None
+            self.state = "wandering"
+            return
+        
+        # Eat fruit from tree
         if self.target_tree:
             tree = self.target_tree
             
@@ -414,6 +526,21 @@ class NPC:
                     if fruit_eaten > 0:
                         self.fruit_collected += fruit_eaten
                         self.hunger = min(self.max_hunger, self.hunger + fruit_eaten * 20.0)
+                        
+                        # Log milestone for first fruit
+                        if self.fruit_collected == fruit_eaten and hasattr(world, 'historian'):
+                            world.historian.register_milestone(
+                                id(self), self.name, "first_fruit",
+                                world.time, world.day_number,
+                                f"Collected {fruit_eaten} fruit"
+                            )
+                        
+                        # Log achievement for significant collection
+                        if self.fruit_collected % 10 == 0 and hasattr(world, 'historian'):
+                            world.historian.register_achievement(
+                                id(self), self.name, "fruit_collection_milestone",
+                                self.fruit_collected, world.time, world.day_number
+                            )
                 
                 # Continue eating until full or no more fruit
                 if self.hunger >= self.max_hunger * 0.9 or tree.get_ripe_fruit_count() == 0:

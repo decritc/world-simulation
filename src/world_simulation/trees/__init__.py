@@ -1,2 +1,0 @@
-"""Fruit tree module."""
-
